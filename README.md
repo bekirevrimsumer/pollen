@@ -47,7 +47,8 @@ Command line: `Pollen.exe --install` installs or updates without asking,
   when it closes
 - Tray: a "hidden icons" button opens Windows' own notification-area flyout right
   above it, so tray apps (Steam, Discord, ...) and their menus work as usual
-- Start button and a clock (click: notifications and calendar)
+- Start button, a clock (click: notifications and calendar) and the taskbar's
+  show-desktop sliver at the right end (in the screen's corner when full width)
 - Click to open, click a running app to focus it, again to minimize, or to cycle its windows
 - Right-click menu: new window, close windows, pin to / remove from the dock, mode,
   quit. Pins made in Pollen are kept in `%APPDATA%\Pollen\pins.txt`; removing one of

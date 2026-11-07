@@ -56,6 +56,11 @@ pub fn open_start() {
     press_keys(&[VK_LWIN]);
 }
 
+/// Shows the desktop, or brings the windows back (the taskbar's corner button).
+pub fn show_desktop() {
+    press_keys(&[VK_LWIN, VIRTUAL_KEY(b'D' as u16)]);
+}
+
 /// Opens the notification center with the calendar.
 pub fn open_notifications() {
     press_keys(&[VK_LWIN, VIRTUAL_KEY(b'N' as u16)]);

@@ -113,6 +113,8 @@ const OPENING_DROP: f32 = 420.0;
 const LABEL_SPACE: f32 = 40.0;
 const CLOCK_PAD: f32 = 6.0;
 /// Smart and Peek: how long the dock stays after the mouse leaves.
+/// The show-desktop sliver at the right end, like the taskbar's (DIPs).
+const DESKTOP_WIDTH: f32 = 12.0;
 const HIDE_DELAY_MS: u32 = 800;
 
 /// Nectar's "Midnight" theme: hsl(#5e8bff's hue, 40%, 10%) = #0f1524.
@@ -438,6 +440,8 @@ struct Layout {
     /// The tray ("hidden icons") button, before the clock.
     tray: D2D_RECT_F,
     clock: D2D_RECT_F,
+    /// Show desktop, after the clock.
+    desktop: D2D_RECT_F,
     icon_bottom: f32,
 }
 
@@ -458,6 +462,7 @@ enum Hit {
     Item(usize),
     Tray,
     Clock,
+    Desktop,
 }
 
 pub struct Dock {
@@ -1197,6 +1202,9 @@ impl Dock {
         x += tile * 0.75;
         let clock_x = x;
         x += self.clock_width;
+        x += 4.0 * s;
+        let desktop_x = x;
+        x += DESKTOP_WIDTH * s;
         let content_width = x;
 
         let left = (width - content_width) / 2.0;
@@ -1231,7 +1239,10 @@ impl Dock {
         let bottom_radius = round * c / 2.0;
         let flare = if self.flares { FLARE * s * (1.0 - w) } else { 0.0 };
 
-        let clock_left = lerp(left + clock_x, width - self.clock_width - 16.0 * s, w);
+        // Full width: the sliver goes to the screen's corner, as on the taskbar.
+        let desktop_left = lerp(left + desktop_x, width - DESKTOP_WIDTH * s, w);
+        let desktop = rect(desktop_left, bar_top + drop, desktop_left + DESKTOP_WIDTH * s, height + drop);
+        let clock_left = lerp(left + clock_x, width - DESKTOP_WIDTH * s - 6.0 * s - self.clock_width, w);
         let clock = rect(clock_left, bar_top + drop, clock_left + self.clock_width, height + drop);
         let tray_left = lerp(left + tray_x, clock_left - tile * 0.75, w);
         let tray = rect(tray_left, bar_top + drop, tray_left + tile * 0.75, height + drop);
@@ -1249,6 +1260,7 @@ impl Dock {
             separators,
             tray,
             clock,
+            desktop,
             icon_bottom: height - PAD_Y * s + drop,
         }
     }
@@ -1266,6 +1278,10 @@ impl Dock {
             return None;
         }
         let gap = GAP * self.scale;
+        let d = layout.desktop;
+        if x >= d.left && x <= d.right && y >= d.top {
+            return Some(Hit::Desktop);
+        }
         let c = layout.clock;
         if x >= c.left && x < c.right && y >= c.top {
             return Some(Hit::Clock);
@@ -1307,7 +1323,7 @@ impl Dock {
         // The tooltip fades in again whenever the hovered item changes.
         let hovered = self.mouse.and_then(|(x, y)| self.hit_test(x, y)).and_then(|h| match h {
             Hit::Item(i) => Some(i),
-            Hit::Tray | Hit::Clock => None,
+            Hit::Tray | Hit::Clock | Hit::Desktop => None,
         });
         let dragging = self.drag.as_ref().is_some_and(|d| d.active);
         let hovered = if dragging { None } else { hovered };
@@ -1628,6 +1644,7 @@ impl Dock {
 
                 self.draw_tray_button(&layout, content);
                 self.draw_clock(&layout, content);
+                self.draw_desktop_button(&layout, content);
                 if clip {
                     rt.PopAxisAlignedClip();
                 }
@@ -1731,6 +1748,24 @@ impl Dock {
             let rt = &self.surface.rt;
             let _ = rt.DrawLine(pt(cx - half, cy + rise), pt(cx, cy - rise), &self.brush, 1.6 * s, None);
             let _ = rt.DrawLine(pt(cx, cy - rise), pt(cx + half, cy + rise), &self.brush, 1.6 * s, None);
+        }
+    }
+
+    /// The taskbar's show-desktop sliver: a thin line, lit while hovered.
+    fn draw_desktop_button(&self, layout: &Layout, content: f32) {
+        let s = self.scale;
+        let d = layout.desktop;
+        let hovered = self.mouse.and_then(|(x, y)| self.hit_test(x, y)) == Some(Hit::Desktop);
+        let pressed = self.pressed == Some(Hit::Desktop);
+        let cy = layout.icon_bottom - TILE * s / 2.0;
+        if hovered || pressed {
+            let r = rect(d.left + 3.0 * s, cy - 14.0 * s, d.right - 1.0 * s, cy + 14.0 * s);
+            self.fill_rounded(r, 3.0 * s, rgba(1.0, 1.0, 1.0, if pressed { 0.18 } else { 0.10 } * content));
+        }
+        unsafe {
+            self.brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.28 * content));
+            let x = d.left + 1.0 * s;
+            let _ = self.surface.rt.DrawLine(pt(x, cy - 10.0 * s), pt(x, cy + 10.0 * s), &self.brush, 1.0 * s, None);
         }
     }
 
@@ -1932,6 +1967,7 @@ impl Dock {
         crate::preview::hide_now();
         match hit {
             Hit::Clock => shell::open_notifications(),
+            Hit::Desktop => shell::show_desktop(),
             Hit::Tray => {
                 let layout = self.layout(true);
                 let t = layout.tray;
