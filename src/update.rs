@@ -44,7 +44,7 @@ pub fn check() -> Option<Release> {
     let url = j["assets"]
         .as_array()?
         .iter()
-        .find(|a| a["name"].as_str().is_some_and(|n| n.to_lowercase().ends_with(".exe")))?["browser_download_url"]
+        .find(|a| a["name"].as_str().is_some_and(|n| n.eq_ignore_ascii_case("Pollen.exe")))?["browser_download_url"]
         .as_str()?
         .to_string();
     Some(Release { version: tag.trim_start_matches('v').to_string(), url })
@@ -60,6 +60,15 @@ pub fn start(notify: HWND, message: u32) {
     std::thread::Builder::new()
         .name("pollen-update".into())
         .spawn(move || {
+            // Downloads of earlier updates, now installed.
+            if let Ok(entries) = std::fs::read_dir(std::env::temp_dir()) {
+                for e in entries.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if name.starts_with("Pollen-") && name.ends_with(".exe") {
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+            }
             std::thread::sleep(Duration::from_secs(60));
             loop {
                 if crate::settings::get().check_updates {
@@ -93,6 +102,14 @@ pub fn install_available() {
         }
         let path: PathBuf = std::env::temp_dir().join(format!("Pollen-{}.exe", release.version));
         if std::fs::write(&path, body).is_err() {
+            return;
+        }
+        // Only a program that calls itself that version of Pollen is run.
+        let path_s = path.display().to_string();
+        let name = crate::apps::version_string(&path_s, "ProductName");
+        let version = crate::apps::version_string(&path_s, "ProductVersion");
+        if name.as_deref() != Some("Pollen") || version.as_deref() != Some(release.version.as_str()) {
+            let _ = std::fs::remove_file(&path);
             return;
         }
         let _ = std::process::Command::new(&path).arg("--install").spawn();

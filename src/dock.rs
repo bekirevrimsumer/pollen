@@ -70,7 +70,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterShellHookWindow, RegisterWindowMessageW,
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, GWLP_USERDATA,
-    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE,
+    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SW_HIDE, SW_MINIMIZE, SW_SHOWNOACTIVATE, TPM_BOTTOMALIGN, TPM_CENTERALIGN, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
     WM_CAPTURECHANGED, WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NULL,
@@ -138,6 +138,8 @@ const CMD_CLOSE: usize = 2;
 const CMD_QUIT: usize = 3;
 const CMD_PIN: usize = 4;
 const CMD_UNPIN: usize = 5;
+/// Jump list entries: this plus their index.
+const CMD_JUMP: usize = 1000;
 const CMD_MODE_FIXED: usize = 10;
 const CMD_MODE_SMART: usize = 11;
 const CMD_MODE_PEEK: usize = 12;
@@ -681,6 +683,7 @@ impl Dock {
             let _ = RegisterShellHookWindow(hwnd);
             crate::appicon::add(hwnd, WM_TRAYICON);
             crate::update::start(hwnd, WM_UPDATE);
+            apps::prefetch_start_ids();
             // Window moves, maximize/restore and minimize decide whether the bar
             // widens (Fixed) or hides (Smart).
             dock._event_hooks = [
@@ -2111,6 +2114,7 @@ impl Dock {
 
     fn on_poll(&mut self) {
         if self.is_main() {
+            profile::flush_counts();
             taskbar::keep_hidden();
             broadcast(WM_SYNC_POLL, LPARAM(0));
         }
@@ -2293,10 +2297,37 @@ impl Dock {
 /// `POLLEN_PROFILE=1`: logs each animation frame (interval since the previous
 /// one, render time) to %TEMP%\pollen-profile.txt, one burst per animation.
 mod profile {
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
     static FRAMES: Mutex<Vec<(f32, f32)>> = Mutex::new(Vec::new());
+    /// WinEvent callbacks: all, those for top-level windows, and the window
+    /// checks they led to.
+    pub static EVENTS: AtomicU64 = AtomicU64::new(0);
+    pub static WINDOW_EVENTS: AtomicU64 = AtomicU64::new(0);
+    pub static CHECKS: AtomicU64 = AtomicU64::new(0);
 
-    fn enabled() -> bool {
+    /// Every poll (5 s): how many events came in since the last one.
+    pub fn flush_counts() {
+        if !enabled() {
+            return;
+        }
+        let line = format!(
+            "events {} (top-level windows {}), window checks {}\n",
+            EVENTS.swap(0, Ordering::Relaxed),
+            WINDOW_EVENTS.swap(0, Ordering::Relaxed),
+            CHECKS.swap(0, Ordering::Relaxed)
+        );
+        if let Some(dir) = std::env::var_os("TEMP") {
+            use std::io::Write;
+            if let Ok(mut f) =
+                std::fs::OpenOptions::new().create(true).append(true).open(std::path::Path::new(&dir).join("pollen-profile.txt"))
+            {
+                let _ = f.write_all(line.as_bytes());
+            }
+        }
+    }
+
+    pub fn enabled() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         *ON.get_or_init(|| std::env::var_os("POLLEN_PROFILE").is_some())
     }
@@ -2445,9 +2476,11 @@ unsafe extern "system" fn win_event(
     _thread: u32,
     _time: u32,
 ) {
+    profile::EVENTS.fetch_add(1, Ordering::Relaxed);
     if id_object != 0 || id_child != 0 || hwnd.0.is_null() || GetAncestor(hwnd, GA_ROOT) != hwnd {
         return;
     }
+    profile::WINDOW_EVENTS.fetch_add(1, Ordering::Relaxed);
     let dock = HWND(DOCK_HWND.load(Ordering::Relaxed) as *mut _);
     if !dock.0.is_null() {
         SetTimer(Some(dock), TIMER_WINDOWS_MOVED, 80, None);
@@ -2462,6 +2495,9 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
         Some(Hit::Item(i)) if (&(*dock).items)[i].kind == Kind::App => Some(i),
         _ => None,
     };
+    // The items can change while the menu is open (an app closes, the list
+    // is re-sorted), so the chosen app is found again by its key afterwards.
+    let key = index.map(|i| (&(*dock).items)[i].key.clone());
     let (can_open, running, pinned) = match index {
         Some(i) => {
             let item = &(&(*dock).items)[i];
@@ -2471,6 +2507,31 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
     };
 
     let Ok(menu) = CreatePopupMenu() else { return };
+    // The app's jump list first, as on the taskbar: its tasks, its own
+    // categories and the files it opened lately.
+    let jump: Vec<apps::JumpItem> = match index {
+        Some(i) => {
+            let item = &(&(*dock).items)[i];
+            let aumid = item.aumid.clone().or_else(|| item.windows.first().and_then(|&w| apps::window_aumid(w)));
+            let ids = apps::app_ids(aumid.as_deref(), item.exe.as_deref());
+            let mut flat = Vec::new();
+            for group in apps::jump_list(&ids, item.exe.as_deref(), 8) {
+                let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, &HSTRING::from(group.title.as_str()));
+                for entry in group.items {
+                    let name: String = if entry.name.chars().count() > 60 {
+                        entry.name.chars().take(59).chain(std::iter::once('…')).collect()
+                    } else {
+                        entry.name.clone()
+                    };
+                    let _ = AppendMenuW(menu, MF_STRING, CMD_JUMP + flat.len(), &HSTRING::from(name.replace('&', "&&")));
+                    flat.push(entry);
+                }
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            }
+            flat
+        }
+        None => Vec::new(),
+    };
     if can_open {
         let open = if running { t("Yeni pencere", "New window") } else { t("Aç", "Open") };
         let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, &HSTRING::from(open));
@@ -2512,13 +2573,30 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
     let _ = DestroyMenu(menu);
     let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
 
-    // The menu ran its own message loop; take a fresh reference.
-    let dock = &mut *dock;
+    // The menu ran its own message loop, in which this dock may have been
+    // destroyed (its monitor unplugged, Pollen quitting): find it again.
+    let _ = dock;
+    if !windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)).as_bool() {
+        return;
+    }
+    let ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut Dock;
+    if ptr.is_null() {
+        return;
+    }
+    let dock = &mut *ptr;
     dock.menu_open = false;
+    let index = key.and_then(|k| dock.items.iter().position(|it| it.key == k));
     if dock.mouse.is_none() && dock.settings.dock_mode != DockMode::Fixed {
         // Hide after the usual pause, unless the mouse comes back.
         dock.lingering = true;
         SetTimer(Some(hwnd), TIMER_HIDE, HIDE_DELAY_MS, None);
+    }
+    let chosen = command.0 as usize;
+    if chosen >= CMD_JUMP {
+        if let Some(entry) = jump.get(chosen - CMD_JUMP) {
+            shell::run(&entry.target, &entry.args);
+        }
+        return;
     }
     match (command.0 as usize, index) {
         (CMD_OPEN, Some(i)) if i < dock.items.len() => dock.launch(i),
@@ -2657,6 +2735,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 TIMER_WINDOWS_MOVED => {
                     let _ = KillTimer(Some(hwnd), TIMER_WINDOWS_MOVED);
+                    profile::CHECKS.fetch_add(1, Ordering::Relaxed);
                     if dock.is_main() {
                         broadcast(WM_SYNC_MOVED, LPARAM(0));
                     }

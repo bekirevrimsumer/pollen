@@ -20,6 +20,15 @@ pub fn launch(target: &str) {
     }
 }
 
+/// Runs a program with arguments (a jump list entry).
+pub fn run(target: &str, args: &str) {
+    let target = wide(target);
+    let args = wide(args);
+    unsafe {
+        ShellExecuteW(None, w!("open"), pcwstr(&target), pcwstr(&args), PCWSTR::null(), SW_SHOWNORMAL);
+    }
+}
+
 pub fn focus(hwnd: HWND) {
     unsafe {
         if IsIconic(hwnd).as_bool() {

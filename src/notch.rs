@@ -25,7 +25,7 @@ use windows::Win32::Graphics::Direct2D::Common::{
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1PathGeometry, ID2D1SolidColorBrush,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_ANTIALIAS_MODE_ALIASED, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
     D2D1_BITMAP_PROPERTIES, D2D1_EXTEND_MODE_CLAMP,
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
@@ -867,9 +867,64 @@ impl Notch {
             *bar += (target.min(1.0) - *bar) * rate;
         }
         self.update_level();
-        if !self.animating {
+        if !self.animating && !self.render_bars(false) {
             self.render();
         }
+    }
+
+    /// Where the level bars are on the closed island (with room for their
+    /// rounded ends).
+    fn bars_box(&self, island: D2D_RECT_F) -> D2D_RECT_F {
+        let s = self.scale;
+        let total = 3.0 * s * 4.0 + 2.5 * s * 3.0;
+        let x0 = island.right - 14.0 * s - self.privacy_inset() - total;
+        let cy = island.top + BAR * s / 2.0;
+        rect((x0 - 2.0 * s).floor(), (cy - 10.0 * s).floor(), (x0 + total + 2.0 * s).ceil(), (cy + 10.0 * s).ceil())
+    }
+
+    /// A level-bar frame: redraws only the bars' box (the island behind them,
+    /// then the bars) and sends only that to the screen, instead of the whole
+    /// window 30 times a second. False when anything else is changing too.
+    fn render_bars(&mut self, force: bool) -> bool {
+        let steady = !self.animating
+            && self.open.value < 0.001
+            && self.music.value > 0.999
+            && self.osd_room.value < 0.001
+            && self.content >= 1.0
+            && !self.headless;
+        if !(steady || force) || self.last_drawn.is_none() {
+            return false;
+        }
+        let s = self.scale;
+        let (island, top_radius, bottom_radius, flare) = self.island();
+        let clip = self.bars_box(island);
+        let cy = island.top + BAR * s / 2.0;
+        let rt = self.surface.rt.clone();
+        unsafe {
+            rt.BeginDraw();
+            rt.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
+            rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
+            if let Some(path) = self.island_path(island, top_radius, bottom_radius, flare) {
+                let (r, g, b) = surface();
+                self.brush.SetColor(&rgba(r, g, b, self.settings.opacity));
+                rt.FillGeometry(&path, &self.brush, None);
+            }
+            // Exactly where draw_closed_music puts them.
+            let (w, gap) = (3.0 * s, 2.5 * s);
+            let x0 = island.right - 14.0 * s - self.privacy_inset() - (w * 4.0 + gap * 3.0);
+            for (i, level) in self.bars.iter().enumerate() {
+                let h = 3.0 * s + level.clamp(0.0, 1.0) * 13.0 * s;
+                let x = x0 + i as f32 * (w + gap);
+                self.fill_rounded(rect(x, cy - h / 2.0, x + w, cy + h / 2.0), w / 2.0, accent());
+            }
+            rt.PopAxisAlignedClip();
+            let _ = rt.EndDraw(None, None);
+        }
+        if !self.headless {
+            let dirty = RECT { left: clip.left as i32, top: clip.top as i32, right: clip.right as i32, bottom: clip.bottom as i32 };
+            let _ = self.surface.present(self.hwnd, self.origin.0, self.origin.1, Some(dirty));
+        }
+        true
     }
 
     // ---- layout ------------------------------------------------------------
@@ -2272,7 +2327,7 @@ impl Notch {
                 let (lw, lh) = self.text_size(label, &self.small_format);
                 let (pad_x, pad_y) = (8.0 * s, 3.0 * s);
                 let cx = (r.left + r.right) / 2.0;
-                let left = (cx - lw / 2.0 - pad_x).clamp(island.left + 6.0 * s, island.right - 6.0 * s - lw - pad_x * 2.0);
+                let left = (cx - lw / 2.0 - pad_x).min(island.right - 6.0 * s - lw - pad_x * 2.0).max(island.left + 6.0 * s);
                 let top = r.bottom + 5.0 * s;
                 let bubble = rect(left, top, left + lw + pad_x * 2.0, top + lh + pad_y * 2.0);
                 self.fill_rounded(bubble, 6.0 * s, rgba(0.0, 0.0, 0.0, 0.8 * alpha));
@@ -2559,7 +2614,7 @@ impl Notch {
         match control {
             Control::Tab(i) => {
                 if TABS[i].1 && self.tab != i {
-                    self.end_city_edit(false);
+                    self.end_city_edit(true);
                     self.tab = i;
                     if i == STATUS_TAB {
                         self.stats = self.sampler.sample();
@@ -2823,6 +2878,11 @@ impl Notch {
             save(&notch, &format!("1-opening-{i}"));
         }
         save(&notch, "1-closed-music");
+        notch.bars = [0.9, 0.2, 0.7, 0.35];
+        notch.render_bars(true);
+        save(&notch, "1-closed-bars-fast");
+        notch.render();
+        save(&notch, "1-closed-bars-full");
         let output = notch.output.clone();
         notch.output = Some(audio::Output { name: String::new(), volume: 0.42, muted: false });
         notch.osd_room = Spring::new(1.0);

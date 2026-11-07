@@ -301,7 +301,7 @@ impl Preview {
             .max(1.0) as usize;
         self.entries.truncate(fit);
         let (w, h) = self.size();
-        let x = (request.anchor.0 - w / 2).clamp(m.left + 8, (m.right - 8 - w).max(m.left));
+        let x = (request.anchor.0 - w / 2).min(m.right - 8 - w).max(m.left + 8);
         let y = request.anchor.1 - h;
         self.origin = (x, y);
         let _ = self.surface.resize(w, h);

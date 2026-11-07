@@ -284,6 +284,10 @@ fn calculate(text: &str) -> Option<f64> {
     if s.is_empty() || !s.iter().any(|c| c.is_ascii_digit()) || !s.iter().any(|c| "+-*/^%".contains(*c)) {
         return None;
     }
+    // The parser recurses per bracket and sign; keep it shallow.
+    if s.len() > 120 || s.iter().filter(|c| matches!(c, '(' | '-' | '^')).count() > 30 {
+        return None;
+    }
     if !s.iter().all(|c| c.is_ascii_digit() || "+-*/^%().".contains(*c)) {
         return None;
     }
@@ -814,7 +818,8 @@ impl Launcher {
             // Ctrl+V
             0x16 => {
                 if let Some(text) = get_clipboard(self.hwnd) {
-                    self.query.push_str(text.lines().next().unwrap_or("").trim());
+                    let room = 100usize.saturating_sub(self.query.chars().count());
+                    self.query.extend(text.lines().next().unwrap_or("").trim().chars().take(room));
                 }
             }
             c if c >= 0x20 => match char::from_u32(c) {

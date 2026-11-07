@@ -93,6 +93,29 @@ fn main() -> Result<()> {
         }
         if args.iter().any(|a| a == "--check-update") {
             println!("this: {}  newer: {:?}", install::VERSION, update::check());
+            if let Some(path) = args.iter().position(|a| a == "--check-update").and_then(|i| args.get(i + 1)) {
+                println!(
+                    "{path}: ProductName {:?}, ProductVersion {:?}",
+                    apps::version_string(path, "ProductName"),
+                    apps::version_string(path, "ProductVersion")
+                );
+            }
+            return Ok(());
+        }
+        if let Some(i) = args.iter().position(|a| a == "--recent") {
+            // pollen --recent <program path or AppUserModelID>
+            let target = args.get(i + 1).cloned().unwrap_or_default();
+            apps::prefetch_start_ids();
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let ids = if target.contains('\\') { apps::app_ids(None, Some(&target)) } else { vec![target.clone()] };
+            println!("ids: {ids:?}");
+            let exe = target.contains('\\').then_some(target.as_str());
+            for group in apps::jump_list(&ids, exe, 10) {
+                println!("[{}]", group.title);
+                for item in group.items {
+                    println!("  {} | {} {}", item.name, item.target, item.args);
+                }
+            }
             return Ok(());
         }
         if let Some(i) = args.iter().position(|a| a == "--search") {

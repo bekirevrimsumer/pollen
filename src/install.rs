@@ -108,9 +108,11 @@ pub fn handle(args: &[String]) -> bool {
     }
     if args.iter().any(|a| a == "--install") {
         let autostart = crate::autostart::is_enabled_anywhere();
-        if install(autostart).is_ok() {
-            launch_installed();
+        if let Err(e) = install(autostart) {
+            ask(t("Pollen kurulamadı", "Pollen could not be installed"), &e, &[], None);
         }
+        // The new version, or the old one again if the update failed.
+        launch_installed();
         return true;
     }
     if args.iter().any(|a| a == "--here") || cfg!(debug_assertions) || is_installed_copy() {
@@ -235,6 +237,10 @@ fn install_flow() -> bool {
                 Ok(()) => launch_installed(),
                 Err(e) => {
                     ask(t("Pollen kurulamadı", "Pollen could not be installed"), &e, &[], None);
+                    // Whatever was installed before keeps running.
+                    if installed_exe().is_some_and(|p| p.exists()) {
+                        launch_installed();
+                    }
                 }
             }
             true
@@ -267,21 +273,30 @@ fn stop_running() {
 /// Copies this program into place and registers it.
 fn install(autostart: bool) -> Result<(), String> {
     let me = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = install_dir().ok_or("LOCALAPPDATA yok")?;
+    let dir = install_dir().ok_or("LOCALAPPDATA")?;
     let target = dir.join("Pollen.exe");
-    stop_running();
     std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    if !same_file(&me, &target) {
-        // A closing Pollen may hold the file for a moment.
-        let mut result = std::fs::copy(&me, &target).map(|_| ());
-        for _ in 0..20 {
+    if same_file(&me, &target) {
+        stop_running();
+    } else {
+        // The new program goes next to the old one first: if it cannot be
+        // written, the running Pollen is left alone.
+        let staged = dir.join("Pollen.new.exe");
+        std::fs::copy(&me, &staged).map_err(|e| format!("{}: {e}", staged.display()))?;
+        stop_running();
+        // Then it takes the old one's place, once the closing Pollen lets go.
+        let mut result = std::fs::rename(&staged, &target);
+        for _ in 0..40 {
             if result.is_ok() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(250));
-            result = std::fs::copy(&me, &target).map(|_| ());
+            result = std::fs::rename(&staged, &target);
         }
-        result.map_err(|e| format!("{}: {e}", target.display()))?;
+        if let Err(e) = result {
+            let _ = std::fs::remove_file(&staged);
+            return Err(format!("{}: {e}", target.display()));
+        }
     }
     let _ = make_shortcut(&target);
     register(&target, &dir);

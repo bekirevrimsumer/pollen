@@ -97,7 +97,10 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Start button, a clock (click: notifications and calendar) and the taskbar's
   show-desktop button at the right end (in the screen's corner when full width)
 - Click to open, click a running app to focus it, again to minimize, or to cycle its windows
-- Right-click menu: new window, close windows, pin to / remove from the dock, mode,
+- Right-click menu: the app's jump list as on the taskbar (its tasks such as "New
+  InPrivate window", its own categories, and recently opened files when Windows'
+  "Show recently opened items" setting is on), then new window, close windows,
+  pin to / remove from the dock, mode,
   quit. Pins made in Pollen are kept in `%APPDATA%\Pollen\pins.txt`; removing one of
   Windows' own taskbar pins only hides it from the dock (`hidden-pins.txt`), since
   Windows does not let other apps change its pins
