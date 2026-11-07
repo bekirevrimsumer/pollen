@@ -1470,7 +1470,8 @@ impl Notch {
         let o = self.open.value.clamp(0.0, 1.0);
         unsafe {
             rt.BeginDraw();
-            rt.Clear(Some(&if self.headless { rgba(0.32, 0.40, 0.52, 1.0) } else { rgba(0.0, 0.0, 0.0, 0.0) }));
+            let backdrop = self.headless && !crate::util::demo();
+            rt.Clear(Some(&if backdrop { rgba(0.32, 0.40, 0.52, 1.0) } else { rgba(0.0, 0.0, 0.0, 0.0) }));
             if let Some(path) = self.island_path(island, top_radius, bottom_radius, flare) {
                 let (r, g, b) = surface();
                 let base = self.settings.opacity;
@@ -1614,11 +1615,15 @@ impl Notch {
                 format!("↓ {}   ↑ {}", system::format_rate(st.down), system::format_rate(st.up)),
                 None,
             ),
-            (ICON_CLOCK, "Açık kalma".to_string(), system::uptime(), None),
+            (ICON_CLOCK, "Açık kalma".to_string(), if crate::util::demo() { "2 sa 14 dk".into() } else { system::uptime() }, None),
             (
                 ICON_INFO,
                 "Pollen".to_string(),
-                system::own_memory().map(system::format_bytes).unwrap_or_default(),
+                if crate::util::demo() {
+                    "15,1 MB".into()
+                } else {
+                    system::own_memory().map(system::format_bytes).unwrap_or_default()
+                },
                 None,
             ),
         ];
@@ -2654,6 +2659,106 @@ impl Notch {
 impl Notch {
     /// `pollen --snapshot <dir>` also renders the notch: its opening, closed and
     /// open, without showing anything on screen.
+    /// `pollen --demo-shots <dir>`: every tab with made-up data (a sample
+    /// song, city and readings), on a transparent background.
+    pub fn demo_shots(dir: &str) -> Result<()> {
+        let mut n = Self::build(true)?;
+        n.time = "09:41".into();
+        n.output = Some(audio::Output { name: "Hoparlör".into(), volume: 0.45, muted: false });
+        n.internet = true;
+        n.radios = network::Radios { wifi: Some(true), bluetooth: Some(false) };
+        n.displays = vec![
+            displays::Display { name: "Monitör 1".into(), device: r"\\.\DISPLAY1".into(), left: 0, brightness: Some(70) },
+            displays::Display { name: "Monitör 2".into(), device: r"\\.\DISPLAY2".into(), left: 1920, brightness: Some(45) },
+        ];
+        let track = media::Track {
+            app: "demo".into(),
+            app_name: "Medya Oynatıcı".into(),
+            title: "Gün Işığı".into(),
+            artist: "Polen Dörtlüsü".into(),
+            playing: true,
+            position_ms: 83_000,
+            read_at: Instant::now(),
+            duration_ms: 214_000,
+            art: Some(std::sync::Arc::new(demo_art())),
+            key: "demo".into(),
+        };
+        n.apply_media(media::Snapshot { tracks: vec![track], current: Some("demo".into()) });
+        n.music = Spring::new(1.0);
+        n.bars = [0.55, 0.8, 0.65, 0.4];
+        n.app_volume = Some(audio::AppVolume { volume: 0.8, muted: false });
+        let hour = |hour, temperature, code| weather::Hour { hour, temperature, code, day: true };
+        let day = |d, high, low, code| weather::Day { date: (n.today.0, n.today.1, d), high, low, code };
+        let next = |k: u32| ((n.today.2 + k - 1) % 28) + 1;
+        n.weather = Some(weather::Weather {
+            city: "İstanbul".into(),
+            temperature: 18.0,
+            high: 21.0,
+            low: 13.0,
+            code: 2,
+            day: true,
+            hours: vec![hour(10, 18.0, 2), hour(11, 19.0, 1), hour(12, 20.0, 0), hour(13, 21.0, 0), hour(14, 21.0, 2), hour(15, 20.0, 3)],
+            days: vec![
+                day(next(1), 20.0, 12.0, 61),
+                day(next(2), 17.0, 11.0, 3),
+                day(next(3), 19.0, 12.0, 2),
+                day(next(4), 22.0, 14.0, 0),
+                day(next(5), 23.0, 15.0, 1),
+            ],
+        });
+        n.stats = system::Stats {
+            cpu: 0.14,
+            memory_used: 7_900_000_000,
+            memory_total: 17_100_000_000,
+            disk_used: 251_000_000_000,
+            disk_total: 511_000_000_000,
+            down: 2_300_000.0,
+            up: 184_000.0,
+        };
+        n.place = None;
+        n.autostart = true;
+        n.month = (n.today.0, n.today.1);
+        let step = |n: &mut Notch, frames: usize| {
+            for _ in 0..frames {
+                std::thread::sleep(Duration::from_millis(16));
+                n.last_tick = Some(Instant::now() - Duration::from_millis(16));
+                n.tick();
+            }
+        };
+        let save = |n: &Notch, name: &str| -> Result<()> {
+            let path = format!("{dir}\\notch-{name}.png");
+            n.surface.save_png(&path)?;
+            println!("saved {path}");
+            Ok(())
+        };
+        n.rise = Spring { value: RISE * n.scale, velocity: 0.0, target: 0.0 };
+        n.opening_since = Some(Instant::now());
+        step(&mut n, 60);
+        save(&n, "closed")?;
+        n.osd_room = Spring::new(1.0);
+        n.render();
+        save(&n, "volume")?;
+        n.osd_room = Spring::new(0.0);
+        n.tab = MUSIC_TAB;
+        n.sync_panel_height(false);
+        n.open.target = 1.0;
+        step(&mut n, 50);
+        for (tab, name) in [
+            (MUSIC_TAB, "music"),
+            (CONTROL_CENTER_TAB, "control-center"),
+            (STATUS_TAB, "status"),
+            (WEATHER_TAB, "weather"),
+            (CALENDAR_TAB, "calendar"),
+            (SETTINGS_TAB, "settings"),
+        ] {
+            n.tab = tab;
+            n.sync_panel_height(false);
+            n.render();
+            save(&n, name)?;
+        }
+        Ok(())
+    }
+
     pub fn snapshot(dir: &str) -> Result<()> {
         let mut notch = Self::build(true)?;
         notch.output = audio::read();
@@ -2863,6 +2968,26 @@ impl Formats {
             big_symbol: symbols(30.0)?,
         })
     }
+}
+
+/// A made-up album cover for the demo screenshots: a warm sky with a sun.
+fn demo_art() -> media::Art {
+    let n = 160u32;
+    let mut pixels = Vec::with_capacity((n * n * 4) as usize);
+    for y in 0..n {
+        for x in 0..n {
+            let t = (x + y) as f32 / (2 * n) as f32;
+            // #ff8a5c to #7a5cff, top left to bottom right.
+            let (mut r, mut g, mut b) = (1.0 + (0.48 - 1.0) * t, 0.54 + (0.36 - 0.54) * t, 0.36 + (1.0 - 0.36) * t);
+            let d = ((x as f32 - 104.0).powi(2) + (y as f32 - 64.0).powi(2)).sqrt();
+            let sun = ((30.0 - d) / 2.0).clamp(0.0, 1.0);
+            r += (1.0 - r) * sun;
+            g += (0.9 - g) * sun;
+            b += (0.6 - b) * sun;
+            pixels.extend([(b * 255.0) as u8, (g * 255.0) as u8, (r * 255.0) as u8, 255]);
+        }
+    }
+    media::Art { width: n, height: n, pixels }
 }
 
 fn weather_icon(w: &weather::Weather) -> char {

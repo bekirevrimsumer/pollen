@@ -8,6 +8,41 @@ Task Manager, one 1 MB program.
 
 > Early stage. Windows 10/11, x64. The interface is in Turkish.
 
+![Pollen: the dock below, the notch open on Music above](docs/screenshots/desktop.png)
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/notch-control-center.png" alt="Control Center"></td>
+    <td><img src="docs/screenshots/notch-weather.png" alt="Weather"></td>
+  </tr>
+  <tr>
+    <td align="center">Kontrol merkezi: Wi-Fi, ses, her monitörün parlaklığı ayrı</td>
+    <td align="center">Hava durumu: şimdi, sonraki saatler ve günler</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/notch-status.png" alt="Status"></td>
+    <td><img src="docs/screenshots/notch-settings.png" alt="Settings"></td>
+  </tr>
+  <tr>
+    <td align="center">Durum: işlemci, bellek, disk, ağ</td>
+    <td align="center">Ayarlar: dock modu, boyut, tema, konum</td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/notch-calendar.png" alt="Calendar"></td>
+    <td>
+      <img src="docs/screenshots/notch-closed.png" alt="Closed notch while music plays"><br><br>
+      <img src="docs/screenshots/notch-volume.png" alt="Volume indicator">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">Takvim</td>
+    <td align="center">Kapalıyken: çalan müzik, ses göstergesi</td>
+  </tr>
+</table>
+
+The screenshots are rendered by Pollen itself with made-up data
+(`Pollen.exe --demo-shots <folder>`, then `python docs/make_screenshots.py <folder>`).
+
 ## Install
 
 1. Download `Pollen.exe` from the [latest release](../../releases/latest).

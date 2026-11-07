@@ -1563,7 +1563,8 @@ impl Dock {
         let height = self.surface.height as f32;
         unsafe {
             rt.BeginDraw();
-            rt.Clear(Some(&if self.headless { rgba(0.32, 0.40, 0.52, 1.0) } else { rgba(0.0, 0.0, 0.0, 0.0) }));
+            let backdrop = self.headless && !crate::util::demo();
+            rt.Clear(Some(&if backdrop { rgba(0.32, 0.40, 0.52, 1.0) } else { rgba(0.0, 0.0, 0.0, 0.0) }));
 
             // Invisible (alpha 1/255) but mouse-catching areas: above the magnified
             // icons while hovering, and a thin strip at the screen edge while hidden,
@@ -2122,6 +2123,62 @@ impl Dock {
 impl Dock {
     /// `pollen --snapshot <dir>`: renders key moments of the dock's motion to PNG
     /// files without showing anything on screen.
+    /// `pollen --demo-shots <dir>`: the dock with Windows' own apps instead of
+    /// the user's, on a transparent background.
+    pub fn demo_shots(dir: &str) -> Result<()> {
+        let mut dock = Self::build(true, None)?;
+        let start = dock.items.drain(..).find(|it| it.kind == Kind::Start);
+        let apps: [(&str, &str, bool); 10] = [
+            ("Dosya Gezgini", r"C:\Windows\explorer.exe", true),
+            ("Microsoft Edge", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", true),
+            ("Terminal", r"shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App", true),
+            ("Not Defteri", r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", false),
+            ("Hesap Makinesi", r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", false),
+            ("Paint", r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App", false),
+            ("Fotoğraflar", r"shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App", false),
+            ("Medya Oynatıcı", r"shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic", true),
+            ("Microsoft Store", r"shell:AppsFolder\Microsoft.WindowsStore_8wekyb3d8bbwe!App", false),
+            ("Ayarlar", r"shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", false),
+        ];
+        dock.items.extend(start);
+        for (name, source, running) in apps {
+            let mut item = Item::new(Kind::App, format!("demo:{name}"), name.into(), source.into(), true, false);
+            if running {
+                // Any window handle: only the running dot is drawn.
+                item.windows = vec![HWND(1 as *mut _)];
+            }
+            dock.items.push(item);
+            let i = dock.items.len() - 1;
+            dock.load_icon(i);
+            if dock.items[i].icon.is_none() {
+                dock.items.pop();
+            }
+        }
+        dock.clock = "09:41".into();
+        dock.measure_clock();
+        let step = |dock: &mut Dock, frames: usize| {
+            for _ in 0..frames {
+                std::thread::sleep(Duration::from_millis(16));
+                dock.last_tick = Some(Instant::now() - Duration::from_millis(16));
+                dock.tick();
+            }
+        };
+        dock.widen = Spring::new(0.0);
+        dock.start_opening();
+        step(&mut dock, 80);
+        // The mouse over the fourth app, for the magnification and its name.
+        let layout = dock.layout(false);
+        let i = 4.min(layout.slots.len() - 1);
+        let slot = &layout.slots[i];
+        dock.mouse = Some((slot.x + slot.size / 2.0 + 6.0, layout.icon_bottom - 10.0));
+        dock.update_targets();
+        step(&mut dock, 40);
+        let path = format!("{dir}\\dock.png");
+        dock.surface.save_png(&path)?;
+        println!("saved {path}");
+        Ok(())
+    }
+
     pub fn snapshot(dir: &str) -> Result<()> {
         let mut dock = Self::build(true, None)?;
         let save = |dock: &Dock, name: &str| {

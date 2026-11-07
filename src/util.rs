@@ -1,4 +1,18 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use windows::core::PCWSTR;
+
+static DEMO: AtomicBool = AtomicBool::new(false);
+
+/// `pollen --demo-shots`: made-up data and transparent backgrounds, for
+/// screenshots that show nothing of the user's own.
+pub fn demo() -> bool {
+    DEMO.load(Ordering::Relaxed)
+}
+
+pub fn set_demo() {
+    DEMO.store(true, Ordering::Relaxed);
+}
 
 /// A NUL-terminated UTF-16 copy of `s`.
 pub fn wide(s: &str) -> Vec<u16> {

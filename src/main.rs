@@ -87,6 +87,13 @@ fn main() -> Result<()> {
             println!("peaks: {:?}", meter.peaks());
             return Ok(());
         }
+        if let Some(i) = args.iter().position(|a| a == "--demo-shots") {
+            let dir = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
+            util::set_demo();
+            settings::use_defaults();
+            dock::Dock::demo_shots(&dir)?;
+            return notch::Notch::demo_shots(&dir);
+        }
         if let Some(i) = args.iter().position(|a| a == "--snapshot") {
             let dir = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
             settings::use_defaults();
