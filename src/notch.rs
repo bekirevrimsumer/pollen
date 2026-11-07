@@ -187,6 +187,18 @@ const fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
 }
 
+/// The theme's text and icon color (white on dark themes, near-black on
+/// light ones) at opacity `a`.
+fn ink_color(a: f32) -> D2D1_COLOR_F {
+    let (r, g, b) = crate::settings::palette().ink;
+    rgba(r, g, b, a)
+}
+
+/// White, whatever the theme: text on the dark tooltip bubbles and on red.
+fn pure_white(a: f32) -> D2D1_COLOR_F {
+    rgba(1.0, 1.0, 1.0, a)
+}
+
 /// The theme's background color.
 fn surface() -> (f32, f32, f32) {
     crate::settings::palette().surface
@@ -1034,21 +1046,21 @@ impl Notch {
     /// The volume indicator: speaker, level bar, percentage.
     fn draw_osd(&self, island: D2D_RECT_F, cy: f32, alpha: f32) {
         let s = self.scale;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let ink = |a: f32| ink_color(a * alpha);
         let (volume, muted) = self.output.as_ref().map_or((0.0, false), |o| (o.volume, o.muted));
         let level = if muted { 0.0 } else { volume };
         let glyph = if level <= 0.0 { ICON_MUTE } else { ICON_VOLUME };
         let x = island.left + 16.0 * s;
-        self.icon(glyph, &self.icon_format, rect(x, cy - 9.0 * s, x + 18.0 * s, cy + 9.0 * s), white(0.95));
+        self.icon(glyph, &self.icon_format, rect(x, cy - 9.0 * s, x + 18.0 * s, cy + 9.0 * s), ink(0.95));
         let text = i18n::percent(level);
         let (tw, th) = self.text_size(&text, &self.date_format);
         let right = island.right - 16.0 * s;
-        self.text(&text, &self.date_format, pt(right - tw, cy - th / 2.0), white(0.8), tw + 4.0);
+        self.text(&text, &self.date_format, pt(right - tw, cy - th / 2.0), ink(0.8), tw + 4.0);
         let track = rect(x + 28.0 * s, cy - 2.5 * s, right - 40.0 * s, cy + 2.5 * s);
-        self.fill_rounded(track, 2.5 * s, white(0.18));
+        self.fill_rounded(track, 2.5 * s, ink(0.18));
         let fill = rect(track.left, track.top, track.left + (track.right - track.left) * level, track.bottom);
         if fill.right - fill.left > 0.5 {
-            self.fill_rounded(fill, 2.5 * s, white(0.95));
+            self.fill_rounded(fill, 2.5 * s, ink(0.95));
         }
     }
 
@@ -1579,12 +1591,12 @@ impl Notch {
                     let a = closed * self.privacy_room.value.clamp(0.0, 1.0);
                     self.draw_privacy_dots(island.right - 14.0 * s, cy, a);
                 }
-                self.text(&self.time, &self.time_format, pt(x, cy - th / 2.0), rgba(1.0, 1.0, 1.0, 0.95 * closed), tw + 4.0);
+                self.text(&self.time, &self.time_format, pt(x, cy - th / 2.0), ink_color(0.95 * closed), tw + 4.0);
                 self.text(
                     &self.date,
                     &self.date_format,
                     pt(date_x, cy - dh / 2.0),
-                    rgba(1.0, 1.0, 1.0, 0.65 * closed),
+                    ink_color(0.65 * closed),
                     dw + 4.0,
                 );
             }
@@ -1640,21 +1652,21 @@ impl Notch {
     /// The weather on the left of the closed island.
     fn draw_closed_status(&self, island: D2D_RECT_F, cy: f32, alpha: f32) {
         let s = self.scale;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let ink = |a: f32| ink_color(a * alpha);
         let (glyph, temp) = match &self.weather {
             Some(w) => (weather_icon(w), format!("{:.0}°", w.temperature)),
             None => (ICON_CLOUD, "--°".to_string()),
         };
         let x = island.left + 14.0 * s;
-        self.weather_symbol(glyph, false, rect(x, cy - 8.0 * s, x + 16.0 * s, cy + 8.0 * s), white(0.85));
+        self.weather_symbol(glyph, false, rect(x, cy - 8.0 * s, x + 16.0 * s, cy + 8.0 * s), ink(0.85));
         let (_, th) = self.text_size(&temp, &self.date_format);
-        self.text(&temp, &self.date_format, pt(x + 20.0 * s, cy - th / 2.0), white(0.85), 40.0 * s);
+        self.text(&temp, &self.date_format, pt(x + 20.0 * s, cy - th / 2.0), ink(0.85), 40.0 * s);
     }
 
     /// The Status tab: CPU, memory, disk, network, uptime and Pollen's own memory.
     fn draw_status(&self, island: D2D_RECT_F, alpha: f32) {
         let s = self.scale;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let ink = |a: f32| ink_color(a * alpha);
         let left = island.left + PAD * s;
         let right = island.right - PAD * s;
         let y = island.top + BAR * s + PAD * 0.7 * s;
@@ -1703,17 +1715,17 @@ impl Notch {
             let x = left + (i % 2) as f32 * (col + 10.0 * s);
             let top = y + (i / 2) as f32 * (52.0 + 10.0) * s;
             let r = rect(x, top, x + col, top + 52.0 * s);
-            self.fill_rounded(r, 11.0 * s, white(0.05));
+            self.fill_rounded(r, 11.0 * s, ink(0.05));
             let icon = rect(r.left + 10.0 * s, r.top + 8.0 * s, r.left + 26.0 * s, r.top + 24.0 * s);
-            self.icon(*glyph, &self.icon_format, icon, white(0.8));
+            self.icon(*glyph, &self.icon_format, icon, ink(0.8));
             let (_, th) = self.text_size(title, &self.title_format);
-            self.text(title, &self.title_format, pt(icon.right + 6.0 * s, (icon.top + icon.bottom - th) / 2.0), white(0.9), col);
+            self.text(title, &self.title_format, pt(icon.right + 6.0 * s, (icon.top + icon.bottom - th) / 2.0), ink(0.9), col);
             let (vw, vh) = self.text_size(value, &self.small_format);
             match fraction {
                 Some(f) => {
-                    self.text(value, &self.small_format, pt(r.right - 10.0 * s - vw, (icon.top + icon.bottom - vh) / 2.0), white(0.6), vw + 4.0);
+                    self.text(value, &self.small_format, pt(r.right - 10.0 * s - vw, (icon.top + icon.bottom - vh) / 2.0), ink(0.6), vw + 4.0);
                     let bar = rect(r.left + 10.0 * s, r.bottom - 14.0 * s, r.right - 10.0 * s, r.bottom - 10.0 * s);
-                    self.fill_rounded(bar, 2.0 * s, white(0.12));
+                    self.fill_rounded(bar, 2.0 * s, ink(0.12));
                     let fill = rect(bar.left, bar.top, bar.left + (bar.right - bar.left) * f.clamp(0.0, 1.0), bar.bottom);
                     if fill.right - fill.left > 0.5 {
                         let color = if *f > 0.9 { rgba(1.0, 0.45, 0.4, alpha) } else { with_alpha(accent(), alpha) };
@@ -1721,7 +1733,7 @@ impl Notch {
                     }
                 }
                 None => {
-                    self.text(value, &self.small_format, pt(r.left + 10.0 * s, r.bottom - 10.0 * s - vh), white(0.7), col - 20.0 * s);
+                    self.text(value, &self.small_format, pt(r.left + 10.0 * s, r.bottom - 10.0 * s - vh), ink(0.7), col - 20.0 * s);
                 }
             }
         }
@@ -1730,7 +1742,7 @@ impl Notch {
     /// The Weather tab: now, the coming hours and the coming days.
     fn draw_weather(&self, island: D2D_RECT_F, alpha: f32) {
         let s = self.scale;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let ink = |a: f32| ink_color(a * alpha);
         let left = island.left + PAD * s;
         let right = island.right - PAD * s;
         let y = island.top + BAR * s + PAD * 0.7 * s;
@@ -1738,47 +1750,47 @@ impl Notch {
         let Some(w) = &self.weather else {
             let text = t("Hava durumu alınıyor…", "Getting the weather…");
             let (tw, th) = self.text_size(text, &self.title_format);
-            self.text(text, &self.title_format, pt((left + right - tw) / 2.0, (card.top + card.bottom - th) / 2.0), white(0.5), tw + 4.0);
+            self.text(text, &self.title_format, pt((left + right - tw) / 2.0, (card.top + card.bottom - th) / 2.0), ink(0.5), tw + 4.0);
             return;
         };
 
         // Now.
-        self.fill_rounded(card, 12.0 * s, white(0.05));
+        self.fill_rounded(card, 12.0 * s, ink(0.05));
         let icon = rect(card.left + 10.0 * s, card.top + 10.0 * s, card.left + 54.0 * s, card.bottom - 10.0 * s);
-        self.weather_symbol(weather_icon(w), true, icon, white(0.9));
+        self.weather_symbol(weather_icon(w), true, icon, ink(0.9));
         let temp = format!("{:.0}°", w.temperature);
         let (tw, th) = self.text_size(&temp, &self.big_format);
         let tx = icon.right + 6.0 * s;
         let cy = (card.top + card.bottom) / 2.0;
-        self.text(&temp, &self.big_format, pt(tx, cy - th / 2.0), white(0.95), tw + 4.0);
+        self.text(&temp, &self.big_format, pt(tx, cy - th / 2.0), ink(0.95), tw + 4.0);
         let x = tx + tw + 14.0 * s;
         let condition = w.condition();
         let (_, ch) = self.text_size(condition, &self.title_format);
         let (_, nh) = self.text_size(&w.city, &self.small_format);
         let top = cy - (ch + nh) / 2.0;
-        self.text(condition, &self.title_format, pt(x, top), white(0.9), card.right - x - 90.0 * s);
-        self.text(&w.city, &self.small_format, pt(x, top + ch), white(0.5), card.right - x - 90.0 * s);
+        self.text(condition, &self.title_format, pt(x, top), ink(0.9), card.right - x - 90.0 * s);
+        self.text(&w.city, &self.small_format, pt(x, top + ch), ink(0.5), card.right - x - 90.0 * s);
         if w.high.is_finite() && w.low.is_finite() {
             let range = format!("↑ {:.0}°   ↓ {:.0}°", w.high, w.low);
             let (rw, rh) = self.text_size(&range, &self.title_format);
-            self.text(&range, &self.title_format, pt(card.right - 14.0 * s - rw, cy - rh / 2.0), white(0.7), rw + 4.0);
+            self.text(&range, &self.title_format, pt(card.right - 14.0 * s - rw, cy - rh / 2.0), ink(0.7), rw + 4.0);
         }
 
         // The coming hours.
         let card = rect(left, card.bottom + 10.0 * s, right, card.bottom + 82.0 * s);
-        self.fill_rounded(card, 12.0 * s, white(0.05));
+        self.fill_rounded(card, 12.0 * s, ink(0.05));
         let n = w.hours.len().max(1) as f32;
         let col = (card.right - card.left) / n;
         for (i, h) in w.hours.iter().enumerate() {
             let cx = card.left + col * (i as f32 + 0.5);
             let label = format!("{:02}:00", h.hour);
             let (lw, _) = self.text_size(&label, &self.small_format);
-            self.text(&label, &self.small_format, pt(cx - lw / 2.0, card.top + 8.0 * s), white(0.5), lw + 4.0);
+            self.text(&label, &self.small_format, pt(cx - lw / 2.0, card.top + 8.0 * s), ink(0.5), lw + 4.0);
             let g = rect(cx - 9.0 * s, card.top + 27.0 * s, cx + 9.0 * s, card.top + 45.0 * s);
-            self.weather_symbol(weather_glyph(h.code, h.day), false, g, white(0.85));
+            self.weather_symbol(weather_glyph(h.code, h.day), false, g, ink(0.85));
             let t = format!("{:.0}°", h.temperature);
             let (tw, th) = self.text_size(&t, &self.title_format);
-            self.text(&t, &self.title_format, pt(cx - tw / 2.0, card.bottom - 8.0 * s - th), white(0.92), tw + 4.0);
+            self.text(&t, &self.title_format, pt(cx - tw / 2.0, card.bottom - 8.0 * s - th), ink(0.92), tw + 4.0);
         }
 
         // The coming days: name, sky, low, a bar across the week's range, high.
@@ -1786,7 +1798,7 @@ impl Notch {
             return;
         }
         let card = rect(left, card.bottom + 10.0 * s, right, card.bottom + 10.0 * s + (w.days.len() as f32 * DAY_ROW + 12.0) * s);
-        self.fill_rounded(card, 12.0 * s, white(0.05));
+        self.fill_rounded(card, 12.0 * s, ink(0.05));
         let lowest = w.days.iter().map(|d| d.low).filter(|v| v.is_finite()).fold(f64::INFINITY, f64::min);
         let highest = w.days.iter().map(|d| d.high).filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
         let span = (highest - lowest).max(1.0);
@@ -1800,20 +1812,20 @@ impl Notch {
                 i18n::weekdays()[weekday_monday0(d.date.0, d.date.1, d.date.2) as usize].to_string()
             };
             let (_, nh) = self.text_size(&name, &self.title_format);
-            self.text(&name, &self.title_format, pt(card.left + 14.0 * s, cy - nh / 2.0), white(0.9), 70.0 * s);
+            self.text(&name, &self.title_format, pt(card.left + 14.0 * s, cy - nh / 2.0), ink(0.9), 70.0 * s);
             let g = rect(card.left + 84.0 * s, cy - 9.0 * s, card.left + 102.0 * s, cy + 9.0 * s);
-            self.weather_symbol(weather_glyph(d.code, true), false, g, white(0.85));
+            self.weather_symbol(weather_glyph(d.code, true), false, g, ink(0.85));
             if !(d.low.is_finite() && d.high.is_finite()) {
                 continue;
             }
             let low = format!("{:.0}°", d.low);
             let (lw, lh) = self.text_size(&low, &self.title_format);
-            self.text(&low, &self.title_format, pt(bar_left - 12.0 * s - lw, cy - lh / 2.0), white(0.55), lw + 4.0);
+            self.text(&low, &self.title_format, pt(bar_left - 12.0 * s - lw, cy - lh / 2.0), ink(0.55), lw + 4.0);
             let high = format!("{:.0}°", d.high);
             let (_, hh) = self.text_size(&high, &self.title_format);
-            self.text(&high, &self.title_format, pt(bar_right + 12.0 * s, cy - hh / 2.0), white(0.92), 40.0 * s);
+            self.text(&high, &self.title_format, pt(bar_right + 12.0 * s, cy - hh / 2.0), ink(0.92), 40.0 * s);
             let track = rect(bar_left, cy - 2.0 * s, bar_right, cy + 2.0 * s);
-            self.fill_rounded(track, 2.0 * s, white(0.10));
+            self.fill_rounded(track, 2.0 * s, ink(0.10));
             let at = |v: f64| bar_left + (bar_right - bar_left) * ((v - lowest) / span) as f32;
             let fill = rect(at(d.low), track.top, at(d.high).max(at(d.low) + 4.0 * s), track.bottom);
             self.fill_rounded(fill, 2.0 * s, with_alpha(accent(), alpha));
@@ -1824,40 +1836,40 @@ impl Notch {
     /// The Settings tab's row titles and a note; the options are controls.
     fn draw_settings(&self, island: D2D_RECT_F, alpha: f32) {
         let s = self.scale;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let ink = |a: f32| ink_color(a * alpha);
         let left = island.left + PAD * s;
         let mut y = island.top + BAR * s + PAD * 0.7 * s;
         for choice in Choice::ALL {
             let cy = y + CHOICE_HEIGHT * s / 2.0;
-            self.icon(choice.icon(), &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), white(0.8));
+            self.icon(choice.icon(), &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), ink(0.8));
             let (_, th) = self.text_size(choice.title(), &self.title_format);
             let x = left + 24.0 * s;
-            self.text(choice.title(), &self.title_format, pt(x, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
+            self.text(choice.title(), &self.title_format, pt(x, cy - th / 2.0), ink(0.9), LABEL_WIDTH * s - 30.0 * s);
             y += (CHOICE_HEIGHT + 10.0) * s;
         }
         let cy = y + CHOICE_HEIGHT * s / 2.0;
-        self.icon(ICON_PLACE, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), white(0.8));
+        self.icon(ICON_PLACE, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), ink(0.8));
         let place_title = t("Hava konumu", "Weather place");
         let (_, th) = self.text_size(place_title, &self.title_format);
-        self.text(place_title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
+        self.text(place_title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), ink(0.9), LABEL_WIDTH * s - 30.0 * s);
         y += (CHOICE_HEIGHT + 6.0) * s;
         if let Some(edit) = &self.city_edit {
             if edit.results.is_empty() && !edit.text.trim().is_empty() {
                 let status = if edit.searching { t("Aranıyor…", "Searching…") } else { t("Bulunamadı", "Nothing found") };
                 let (_, sh) = self.text_size(status, &self.small_format);
                 let x = left + LABEL_WIDTH * s + 12.0 * s;
-                self.text(status, &self.small_format, pt(x, y + (RESULT_HEIGHT * s - sh) / 2.0), white(0.5), 200.0 * s);
+                self.text(status, &self.small_format, pt(x, y + (RESULT_HEIGHT * s - sh) / 2.0), ink(0.5), 200.0 * s);
             }
         }
         y += (self.city_list_height() + 4.0) * s;
         let cy = y + CHOICE_HEIGHT * s / 2.0;
-        self.icon(ICON_THEME, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), white(0.8));
+        self.icon(ICON_THEME, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), ink(0.8));
         // With the theme's name when it fits.
         let room = LABEL_WIDTH * s - 30.0 * s;
         let named = format!("{} · {}", t("Tema", "Theme"), self.settings.theme.label());
         let title = if self.text_size(&named, &self.title_format).0 <= room { named } else { t("Tema", "Theme").to_string() };
         let (_, th) = self.text_size(&title, &self.title_format);
-        self.text(&title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
+        self.text(&title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), ink(0.9), LABEL_WIDTH * s - 30.0 * s);
         y += (CHOICE_HEIGHT + 10.0) * s;
         y += (SLIDER_HEIGHT + 16.0) * s;
         match crate::update::available() {
@@ -1865,20 +1877,20 @@ impl Notch {
                 let hot = self.hovered_control() == Some(Control::Update);
                 let note = format!("↓ Pollen {} {}", release.version, t("hazır · kurmak için tıkla", "is ready · click to install"));
                 let (_, nh) = self.text_size(&note, &self.small_format);
-                let color = if hot { white(1.0) } else { with_alpha(accent(), alpha) };
+                let color = if hot { ink(1.0) } else { with_alpha(accent(), alpha) };
                 self.text(&note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), color, 245.0 * s);
             }
             None => {
                 let note = format!("Pollen {} · {}", crate::install::VERSION, t("ayarlar kendiliğinden kaydedilir", "settings save themselves"));
                 let (_, nh) = self.text_size(&note, &self.small_format);
-                self.text(&note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), white(0.4), 245.0 * s);
+                self.text(&note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), ink(0.4), 245.0 * s);
             }
         }
     }
 
     fn draw_calendar(&self, island: D2D_RECT_F, alpha: f32) {
         let s = self.scale;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let ink = |a: f32| ink_color(a * alpha);
         let hovered = self.hovered_control();
         let left = island.left + PAD * s;
         let right = island.right - PAD * s;
@@ -1893,22 +1905,22 @@ impl Notch {
             };
             let hot = hovered == Some(control);
             if hot {
-                self.fill_rounded(r, 14.0 * s, white(0.10));
+                self.fill_rounded(r, 14.0 * s, ink(0.10));
             }
-            self.icon(glyph, &self.icon_format, r, white(if hot { 1.0 } else { 0.7 }));
+            self.icon(glyph, &self.icon_format, r, ink(if hot { 1.0 } else { 0.7 }));
         }
         let title = format!("{} {}", i18n::months()[(month - 1) as usize], year);
         let (tw, th) = self.text_size(&title, &self.track_format);
         let current = (year, month) == (self.today.0, self.today.1);
         let title_alpha = if hovered == Some(Control::CalendarTitle) && !current { 1.0 } else { 0.95 };
-        self.text(&title, &self.track_format, pt((left + right - tw) / 2.0, y + 14.0 * s - th / 2.0), white(title_alpha), tw + 4.0);
+        self.text(&title, &self.track_format, pt((left + right - tw) / 2.0, y + 14.0 * s - th / 2.0), ink(title_alpha), tw + 4.0);
         y += 34.0 * s;
 
         let cell = (right - left) / 7.0;
         for (i, day) in i18n::weekdays().iter().enumerate() {
             let (w, h) = self.text_size(day, &self.small_format);
             let x = left + i as f32 * cell + (cell - w) / 2.0;
-            self.text(day, &self.small_format, pt(x, y + (18.0 * s - h) / 2.0), white(if i >= 5 { 0.4 } else { 0.55 }), w + 4.0);
+            self.text(day, &self.small_format, pt(x, y + (18.0 * s - h) / 2.0), ink(if i >= 5 { 0.4 } else { 0.55 }), w + 4.0);
         }
         y += 18.0 * s;
 
@@ -1939,11 +1951,11 @@ impl Notch {
                 let color = if today {
                     with_alpha(on_accent(), alpha)
                 } else if !inside {
-                    white(0.22)
+                    ink(0.22)
                 } else if col >= 5 {
-                    white(0.6)
+                    ink(0.6)
                 } else {
-                    white(0.9)
+                    ink(0.9)
                 };
                 self.text(&text, &self.title_format, pt(cx - w / 2.0, cy - h / 2.0), color, w + 4.0);
             }
@@ -1953,8 +1965,8 @@ impl Notch {
     /// The track's art with rounded corners, or a note on a tile without art.
     fn draw_art(&self, track: &media::Track, r: D2D_RECT_F, radius: f32, alpha: f32) {
         let Some(bitmap) = self.art.get(&track.key) else {
-            self.fill_rounded(r, radius, rgba(1.0, 1.0, 1.0, 0.08 * alpha));
-            self.icon(ICON_MUSIC, &self.icon_format, r, rgba(1.0, 1.0, 1.0, 0.6 * alpha));
+            self.fill_rounded(r, radius, ink_color(0.08 * alpha));
+            self.icon(ICON_MUSIC, &self.icon_format, r, ink_color(0.6 * alpha));
             return;
         };
         unsafe {
@@ -1980,7 +1992,7 @@ impl Notch {
     /// The open Music tab's art and text (its buttons are drawn as controls).
     fn draw_music(&self, island: D2D_RECT_F, alpha: f32) {
         let s = self.scale;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let ink = |a: f32| ink_color(a * alpha);
         let left = island.left + PAD * s;
         let right = island.right - PAD * s;
         let mut y = island.top + BAR * s + PAD * 0.7 * s;
@@ -1991,7 +2003,7 @@ impl Notch {
             let text = t("Şu an çalan bir şey yok", "Nothing is playing");
             let (w, h) = self.text_size(text, &self.title_format);
             let cy = island.top + BAR * s + 64.0 * s / 2.0;
-            self.text(text, &self.title_format, pt((left + right - w) / 2.0, cy - h / 2.0), white(0.55), w + 4.0);
+            self.text(text, &self.title_format, pt((left + right - w) / 2.0, cy - h / 2.0), ink(0.55), w + 4.0);
             return;
         };
         let art = rect(left, y, left + ART * s, y + ART * s);
@@ -2003,9 +2015,9 @@ impl Notch {
         let (_, ah) = self.text_size(&track.artist, &self.title_format);
         let (_, nh) = self.text_size(&track.app_name, &self.small_format);
         let top = y + (ART * s - th - ah - nh - 6.0 * s) / 2.0;
-        self.text(&track.title, &self.track_format, pt(x, top), white(0.95), limit);
-        self.text(&track.artist, &self.title_format, pt(x, top + th + 2.0 * s), white(0.65), limit);
-        self.text(&track.app_name, &self.small_format, pt(x, top + th + ah + 6.0 * s), white(0.4), limit);
+        self.text(&track.title, &self.track_format, pt(x, top), ink(0.95), limit);
+        self.text(&track.artist, &self.title_format, pt(x, top + th + 2.0 * s), ink(0.65), limit);
+        self.text(&track.app_name, &self.small_format, pt(x, top + th + ah + 6.0 * s), ink(0.4), limit);
 
         // Times beside the progress bar.
         let bar_y = y + (ART + 14.0) * s;
@@ -2014,8 +2026,8 @@ impl Notch {
         let (ew, eh) = self.text_size(&elapsed, &self.small_format);
         let (tw, _) = self.text_size(&total, &self.small_format);
         let cy = bar_y + 8.0 * s;
-        self.text(&elapsed, &self.small_format, pt(left + 34.0 * s - ew, cy - eh / 2.0), white(0.55), ew + 4.0);
-        self.text(&total, &self.small_format, pt(right - 34.0 * s, cy - eh / 2.0), white(0.55), tw + 4.0);
+        self.text(&elapsed, &self.small_format, pt(left + 34.0 * s - ew, cy - eh / 2.0), ink(0.55), ew + 4.0);
+        self.text(&total, &self.small_format, pt(right - 34.0 * s, cy - eh / 2.0), ink(0.55), tw + 4.0);
     }
 
     fn hovered_control(&self) -> Option<Control> {
@@ -2024,13 +2036,13 @@ impl Notch {
 
     fn draw_panel(&self, island: D2D_RECT_F, alpha: f32) {
         let s = self.scale;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let ink = |a: f32| ink_color(a * alpha);
         let hovered = self.hovered_control();
         let cy = island.top + BAR * s / 2.0;
 
         // Top row: time, tabs, date.
         let (_, th) = self.text_size(&self.time, &self.time_format);
-        self.text(&self.time, &self.time_format, pt(island.left + 16.0 * s, cy - th / 2.0), white(0.95), 80.0 * s);
+        self.text(&self.time, &self.time_format, pt(island.left + 16.0 * s, cy - th / 2.0), ink(0.95), 80.0 * s);
         if self.privacy.any() {
             // Who is listening or watching, in place of the date.
             let mut names: Vec<&str> = self.privacy.camera.iter().map(String::as_str).collect();
@@ -2049,10 +2061,10 @@ impl Notch {
             let tabs_right = (island.left + island.right) / 2.0 + 40.0 * s * TABS.len() as f32 / 2.0;
             let limit = (dots_left - 4.0 * s - tabs_right - 8.0 * s).max(0.0);
             let x = dots_left - 4.0 * s - lw.min(limit);
-            self.text(&label, &self.date_format, pt(x, cy - lh / 2.0), white(0.8), limit);
+            self.text(&label, &self.date_format, pt(x, cy - lh / 2.0), ink(0.8), limit);
         } else {
             let (dw, dh) = self.text_size(&self.date, &self.date_format);
-            self.text(&self.date, &self.date_format, pt(island.right - 16.0 * s - dw, cy - dh / 2.0), white(0.65), dw + 4.0);
+            self.text(&self.date, &self.date_format, pt(island.right - 16.0 * s - dw, cy - dh / 2.0), ink(0.65), dw + 4.0);
         }
 
         match self.tab {
@@ -2069,14 +2081,14 @@ impl Notch {
                     let selected = self.track().is_some_and(|t| t.app == app);
                     let hot = hovered == Some(Control::Player(app.clone()));
                     let bg = if selected { 0.16 } else if hot { 0.10 } else { 0.05 };
-                    self.fill_rounded(r, 11.0 * s, white(bg));
+                    self.fill_rounded(r, 11.0 * s, ink(bg));
                     let name = self.media.tracks.iter().find(|t| t.app == app).map(|t| t.app_name.clone()).unwrap_or_default();
                     let (w, h) = self.text_size(&name, &self.small_format);
                     self.text(
                         &name,
                         &self.small_format,
                         pt((r.left + r.right - w) / 2.0, (r.top + r.bottom - h) / 2.0),
-                        white(if selected { 0.95 } else { 0.6 }),
+                        ink(if selected { 0.95 } else { 0.6 }),
                         r.right - r.left,
                     );
                 }
@@ -2087,12 +2099,12 @@ impl Notch {
                         let thickness = if hot { 6.0 } else { 4.0 } * s;
                         let cy = (r.top + r.bottom) / 2.0;
                         let bar = rect(r.left, cy - thickness / 2.0, r.right, cy + thickness / 2.0);
-                        self.fill_rounded(bar, thickness / 2.0, white(0.15));
+                        self.fill_rounded(bar, thickness / 2.0, ink(0.15));
                         if track.duration_ms > 0 {
                             let f = track.position_now() as f32 / track.duration_ms as f32;
                             let fill = rect(bar.left, bar.top, bar.left + (bar.right - bar.left) * f.clamp(0.0, 1.0), bar.bottom);
                             if fill.right - fill.left > 0.5 {
-                                self.fill_rounded(fill, thickness / 2.0, white(0.9));
+                                self.fill_rounded(fill, thickness / 2.0, ink(0.9));
                             }
                         }
                     }
@@ -2114,13 +2126,14 @@ impl Notch {
                         (r.top + r.bottom) / 2.0 + (r.bottom - r.top) / 2.0 * k,
                     );
                     if button == MediaButton::PlayPause {
-                        self.fill_rounded(b, (b.right - b.left) / 2.0, white(if hot { 1.0 } else { 0.92 }));
-                        self.icon(glyph, format, b, with_alpha(on_accent(), alpha));
+                        self.fill_rounded(b, (b.right - b.left) / 2.0, ink(if hot { 1.0 } else { 0.92 }));
+                        let (sr, sg, sb) = surface();
+                        self.icon(glyph, format, b, rgba(sr, sg, sb, alpha));
                     } else {
                         if hot {
-                            self.fill_rounded(b, (b.right - b.left) / 2.0, white(0.10));
+                            self.fill_rounded(b, (b.right - b.left) / 2.0, ink(0.10));
                         }
-                        self.icon(glyph, format, b, white(if hot { 1.0 } else { 0.8 }));
+                        self.icon(glyph, format, b, ink(if hot { 1.0 } else { 0.8 }));
                     }
                 }
                 Control::Tab(i) => {
@@ -2135,7 +2148,7 @@ impl Notch {
                     } else {
                         0.55
                     };
-                    self.icon(glyph, &self.tab_icon_format, rect(r.left, r.top, r.right, r.bottom - 2.0 * s), white(a));
+                    self.icon(glyph, &self.tab_icon_format, rect(r.left, r.top, r.right, r.bottom - 2.0 * s), ink(a));
                     if active {
                         let mid = (r.left + r.right) / 2.0;
                         self.fill_rounded(
@@ -2152,8 +2165,8 @@ impl Notch {
                     let bg = if pressed { 0.16 } else if hot { 0.10 } else { 0.05 };
                     let lift = if hot && !pressed { 1.0 * s } else { 0.0 };
                     let b = rect(r.left, r.top - lift, r.right, r.bottom - lift);
-                    self.fill_rounded(b, BUTTON * s / 2.0, white(bg));
-                    self.icon(button.icon(), &self.icon_format, b, white(if hot { 1.0 } else { 0.75 }));
+                    self.fill_rounded(b, BUTTON * s / 2.0, ink(bg));
+                    self.icon(button.icon(), &self.icon_format, b, ink(if hot { 1.0 } else { 0.75 }));
                 }
                 Control::SliderIcon(slider) => {
                     let glyph = match &slider {
@@ -2165,7 +2178,7 @@ impl Notch {
                         Slider::Opacity => ICON_COLOR,
                     };
                     let hot = hovered == Some(Control::SliderIcon(slider.clone())) && matches!(slider, Slider::Volume | Slider::App);
-                    self.icon(glyph, &self.icon_format, r, white(if hot { 1.0 } else { 0.8 }));
+                    self.icon(glyph, &self.icon_format, r, ink(if hot { 1.0 } else { 0.8 }));
                     let name = match &slider {
                         Slider::Volume => t("Ses", "Volume").to_string(),
                         Slider::App => self.track().map(|t| t.app_name.clone()).unwrap_or_default(),
@@ -2177,7 +2190,7 @@ impl Notch {
                     let (_, nh) = self.text_size(&name, &self.title_format);
                     let x = r.right + 6.0 * s;
                     let limit = island.left + PAD * s + LABEL_WIDTH * s - 8.0 * s - x;
-                    self.text(&name, &self.title_format, pt(x, (r.top + r.bottom - nh) / 2.0), white(0.9), limit);
+                    self.text(&name, &self.title_format, pt(x, (r.top + r.bottom - nh) / 2.0), ink(0.9), limit);
                 }
                 Control::Slider(slider) => self.draw_slider(r, &slider, hovered == Some(Control::Slider(slider.clone())), alpha),
                 Control::Theme(i) => {
@@ -2189,7 +2202,7 @@ impl Notch {
                     if selected || hot {
                         let ring = rect(r.left - 3.0 * s, r.top - 3.0 * s, r.right + 3.0 * s, r.bottom + 3.0 * s);
                         unsafe {
-                            self.brush.SetColor(&white(if selected { 0.9 } else { 0.35 }));
+                            self.brush.SetColor(&ink(if selected { 0.9 } else { 0.35 }));
                             self.surface.rt.DrawRoundedRectangle(
                                 &D2D1_ROUNDED_RECT { rect: ring, radiusX: d / 2.0 + 3.0 * s, radiusY: d / 2.0 + 3.0 * s },
                                 &self.brush,
@@ -2213,24 +2226,24 @@ impl Notch {
                     // The row's track once, behind its first option.
                     if i == 0 {
                         let track = rect(r.left, r.top, r.left + (r.right - r.left) * n as f32, r.bottom);
-                        self.fill_rounded(track, radius, white(0.06));
+                        self.fill_rounded(track, radius, ink(0.06));
                     }
                     let inner = rect(r.left + 2.0 * s, r.top + 2.0 * s, r.right - 2.0 * s, r.bottom - 2.0 * s);
                     if selected {
                         self.fill_rounded(inner, radius - 2.0 * s, with_alpha(accent(), alpha));
                     } else if hot {
-                        self.fill_rounded(inner, radius - 2.0 * s, white(0.08));
+                        self.fill_rounded(inner, radius - 2.0 * s, ink(0.08));
                     }
                     let label = choice.options()[i];
                     let (lw, lh) = self.text_size(label, &self.title_format);
-                    let color = if selected { with_alpha(on_accent(), alpha) } else { white(if hot { 0.95 } else { 0.7 }) };
+                    let color = if selected { with_alpha(on_accent(), alpha) } else { ink(if hot { 0.95 } else { 0.7 }) };
                     self.text(label, &self.title_format, pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0), color, lw + 4.0);
                 }
                 Control::CityField => {
                     let editing = self.city_edit.is_some();
                     let hot = hovered == Some(Control::CityField);
                     let radius = (r.bottom - r.top) / 2.0;
-                    self.fill_rounded(r, radius, white(if editing { 0.10 } else if hot { 0.09 } else { 0.06 }));
+                    self.fill_rounded(r, radius, ink(if editing { 0.10 } else if hot { 0.09 } else { 0.06 }));
                     if editing {
                         let edge = rect(r.left + 0.75 * s, r.top + 0.75 * s, r.right - 0.75 * s, r.bottom - 0.75 * s);
                         unsafe {
@@ -2251,9 +2264,9 @@ impl Notch {
                             if edit.text.is_empty() {
                                 let hint = t("Şehir ara…", "Search for a city…");
                                 let (_, ph) = self.text_size(hint, &self.title_format);
-                                self.text(hint, &self.title_format, pt(x + 3.0 * s, cy - ph / 2.0), white(0.4), r.right - x);
+                                self.text(hint, &self.title_format, pt(x + 3.0 * s, cy - ph / 2.0), ink(0.4), r.right - x);
                             } else {
-                                self.text(&edit.text, &self.title_format, pt(x, cy - th / 2.0), white(0.95), r.right - x - 8.0 * s);
+                                self.text(&edit.text, &self.title_format, pt(x, cy - th / 2.0), ink(0.95), r.right - x - 8.0 * s);
                             }
                             let cx = (x + tw + 1.0 * s).min(r.right - 10.0 * s);
                             self.fill_rounded(rect(cx, cy - 7.0 * s, cx + 1.5 * s, cy + 7.0 * s), 0.75 * s, with_alpha(accent(), alpha));
@@ -2266,20 +2279,20 @@ impl Notch {
                             };
                             let limit = if self.place.is_some() { r.right - 84.0 * s - x } else { r.right - 12.0 * s - x };
                             let (_, th) = self.text_size(&label, &self.title_format);
-                            self.text(&label, &self.title_format, pt(x, cy - th / 2.0), white(0.9), limit);
+                            self.text(&label, &self.title_format, pt(x, cy - th / 2.0), ink(0.9), limit);
                         }
                     }
                 }
                 Control::CityAuto => {
                     let hot = hovered == Some(Control::CityAuto);
-                    self.fill_rounded(r, (r.bottom - r.top) / 2.0, white(if hot { 0.18 } else { 0.09 }));
+                    self.fill_rounded(r, (r.bottom - r.top) / 2.0, ink(if hot { 0.18 } else { 0.09 }));
                     let auto = t("Otomatik", "Automatic");
                     let (lw, lh) = self.text_size(auto, &self.small_format);
                     self.text(
                         auto,
                         &self.small_format,
                         pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0),
-                        white(if hot { 1.0 } else { 0.75 }),
+                        ink(if hot { 1.0 } else { 0.75 }),
                         lw + 4.0,
                     );
                 }
@@ -2287,30 +2300,30 @@ impl Notch {
                     let Some(place) = self.city_edit.as_ref().and_then(|e| e.results.get(i)) else { continue };
                     let hot = hovered == Some(Control::CityResult(i));
                     if hot || i == 0 {
-                        self.fill_rounded(r, 8.0 * s, white(if hot { 0.10 } else { 0.05 }));
+                        self.fill_rounded(r, 8.0 * s, ink(if hot { 0.10 } else { 0.05 }));
                     }
                     let x = r.left + 12.0 * s;
                     let cy = (r.top + r.bottom) / 2.0;
                     let (nw, nh) = self.text_size(&place.name, &self.title_format);
                     let name_limit = (r.right - x) * 0.55;
-                    self.text(&place.name, &self.title_format, pt(x, cy - nh / 2.0), white(0.95), name_limit);
+                    self.text(&place.name, &self.title_format, pt(x, cy - nh / 2.0), ink(0.95), name_limit);
                     let rx = x + nw.min(name_limit) + 8.0 * s;
                     let (_, rh) = self.text_size(&place.region, &self.small_format);
-                    self.text(&place.region, &self.small_format, pt(rx, cy - rh / 2.0), white(0.5), r.right - 8.0 * s - rx);
+                    self.text(&place.region, &self.small_format, pt(rx, cy - rh / 2.0), ink(0.5), r.right - 8.0 * s - rx);
                 }
                 Control::Update => {}
                 Control::Quit => {
                     let hot = hovered == Some(Control::Quit);
                     let pressed = self.pressed == Some(Control::Quit);
                     let bg = if pressed { 0.16 } else if hot { 0.11 } else { 0.06 };
-                    self.fill_rounded(r, 15.0 * s, white(bg));
+                    self.fill_rounded(r, 15.0 * s, ink(bg));
                     let label = t("Pollen'dan çık", "Quit Pollen");
                     let (lw, lh) = self.text_size(label, &self.title_format);
                     let iw = 16.0 * s;
                     let x = (r.left + r.right - iw - 6.0 * s - lw) / 2.0;
                     let cy = (r.top + r.bottom) / 2.0;
-                    self.icon(ICON_POWER, &self.icon_format, rect(x, cy - 8.0 * s, x + iw, cy + 8.0 * s), white(if hot { 1.0 } else { 0.8 }));
-                    self.text(label, &self.title_format, pt(x + iw + 6.0 * s, cy - lh / 2.0), white(if hot { 1.0 } else { 0.85 }), lw + 4.0);
+                    self.icon(ICON_POWER, &self.icon_format, rect(x, cy - 8.0 * s, x + iw, cy + 8.0 * s), ink(if hot { 1.0 } else { 0.8 }));
+                    self.text(label, &self.title_format, pt(x + iw + 6.0 * s, cy - lh / 2.0), ink(if hot { 1.0 } else { 0.85 }), lw + 4.0);
                 }
             }
         }
@@ -2331,7 +2344,7 @@ impl Notch {
                 let top = r.bottom + 5.0 * s;
                 let bubble = rect(left, top, left + lw + pad_x * 2.0, top + lh + pad_y * 2.0);
                 self.fill_rounded(bubble, 6.0 * s, rgba(0.0, 0.0, 0.0, 0.8 * alpha));
-                self.text(label, &self.small_format, pt(left + pad_x, top + pad_y), white(0.95), lw + 4.0);
+                self.text(label, &self.small_format, pt(left + pad_x, top + pad_y), pure_white(0.95 * alpha), lw + 4.0);
             }
         }
     }
@@ -2364,16 +2377,16 @@ impl Notch {
         let bg = if on {
             with_alpha(accent(), alpha * if hot { 0.9 } else { 1.0 })
         } else {
-            rgba(1.0, 1.0, 1.0, (if hot { 0.08 } else { 0.04 }) * alpha)
+            ink_color((if hot { 0.08 } else { 0.04 }) * alpha)
         };
         self.fill_rounded(r, 11.0 * s, bg);
-        let fg = if on { with_alpha(on_accent(), alpha) } else { rgba(1.0, 1.0, 1.0, 0.9 * alpha) };
-        let muted = if on { rgba(on_accent().r, on_accent().g, on_accent().b, 0.6 * alpha) } else { rgba(1.0, 1.0, 1.0, 0.45 * alpha) };
+        let fg = if on { with_alpha(on_accent(), alpha) } else { ink_color(0.9 * alpha) };
+        let muted = if on { rgba(on_accent().r, on_accent().g, on_accent().b, 0.6 * alpha) } else { ink_color(0.45 * alpha) };
         let circle = rect(r.left + 10.0 * s, r.top + 9.0 * s, r.left + 34.0 * s, r.top + 33.0 * s);
         self.fill_rounded(
             circle,
             12.0 * s,
-            if on { rgba(0.0, 0.0, 0.0, 0.08 * alpha) } else { rgba(1.0, 1.0, 1.0, 0.08 * alpha) },
+            if on { rgba(0.0, 0.0, 0.0, 0.08 * alpha) } else { ink_color(0.08 * alpha) },
         );
         self.icon(icon, &self.icon_format, circle, fg);
         let x = circle.right + 8.0 * s;
@@ -2393,12 +2406,12 @@ impl Notch {
         let thickness = if active { 6.0 } else { 4.0 } * s;
         let cy = (r.top + r.bottom) / 2.0;
         let track = rect(r.left, cy - thickness / 2.0, r.right, cy + thickness / 2.0);
-        self.fill_rounded(track, thickness / 2.0, rgba(1.0, 1.0, 1.0, 0.15 * alpha));
+        self.fill_rounded(track, thickness / 2.0, ink_color(0.15 * alpha));
         match value {
             Some(v) => {
                 let fill = rect(track.left, track.top, track.left + (track.right - track.left) * v, track.bottom);
                 if fill.right - fill.left > 0.5 {
-                    self.fill_rounded(fill, thickness / 2.0, rgba(1.0, 1.0, 1.0, 0.9 * alpha));
+                    self.fill_rounded(fill, thickness / 2.0, ink_color(0.9 * alpha));
                 }
                 let text = i18n::percent(v);
                 let (tw, th) = self.text_size(&text, &self.small_format);
@@ -2406,14 +2419,14 @@ impl Notch {
                     &text,
                     &self.small_format,
                     pt(r.right + 40.0 * s - tw, cy - th / 2.0),
-                    rgba(1.0, 1.0, 1.0, if active { 0.9 } else { 0.55 } * alpha),
+                    ink_color(if active { 0.9 } else { 0.55 } * alpha),
                     tw + 4.0,
                 );
             }
             None => {
                 let text = "—";
                 let (tw, th) = self.text_size(text, &self.small_format);
-                self.text(text, &self.small_format, pt(r.right + 40.0 * s - tw, cy - th / 2.0), rgba(1.0, 1.0, 1.0, 0.4 * alpha), tw + 4.0);
+                self.text(text, &self.small_format, pt(r.right + 40.0 * s - tw, cy - th / 2.0), ink_color(0.4 * alpha), tw + 4.0);
             }
         }
     }

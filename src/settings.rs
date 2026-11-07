@@ -170,10 +170,14 @@ pub enum Theme {
     Ember,
     /// Follows Windows' accent color.
     Windows,
+    // Light themes (Nectar's Latte and Mist, and a plain one).
+    Light,
+    Latte,
+    Mist,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 8] = [
+    pub const ALL: [Theme; 11] = [
         Theme::Midnight,
         Theme::Graphite,
         Theme::Ocean,
@@ -182,6 +186,9 @@ impl Theme {
         Theme::Rose,
         Theme::Ember,
         Theme::Windows,
+        Theme::Light,
+        Theme::Latte,
+        Theme::Mist,
     ];
 
     fn key(self) -> &'static str {
@@ -194,6 +201,9 @@ impl Theme {
             Theme::Rose => "rose",
             Theme::Ember => "ember",
             Theme::Windows => "windows",
+            Theme::Light => "light",
+            Theme::Latte => "latte",
+            Theme::Mist => "mist",
         }
     }
 
@@ -207,10 +217,13 @@ impl Theme {
             Theme::Rose => crate::i18n::t("Gül", "Rose"),
             Theme::Ember => crate::i18n::t("Kor", "Ember"),
             Theme::Windows => "Windows",
+            Theme::Light => crate::i18n::t("Açık", "Light"),
+            Theme::Latte => "Latte",
+            Theme::Mist => crate::i18n::t("Sis", "Mist"),
         }
     }
 
-    fn parse(s: &str) -> Option<Theme> {
+    pub fn parse(s: &str) -> Option<Theme> {
         Theme::ALL.into_iter().find(|t| t.key() == s.trim())
     }
 
@@ -221,6 +234,10 @@ impl Theme {
         // choice for Midnight).
         let (hue, saturation, accent) = match self {
             Theme::Midnight => return Palette::new((9.0 / 255.0, 12.0 / 255.0, 20.0 / 255.0), hex(0x7aa2ff)),
+            // Nectar's light surfaces: almost white, faintly tinted.
+            Theme::Light => return Palette::new(hex(0xf5f5f7), hex(0x007aff)),
+            Theme::Latte => return Palette::new(from_hsl(28.0, 0.30, 0.94), hex(0xb8641c)),
+            Theme::Mist => return Palette::new(from_hsl(211.0, 0.35, 0.95), hex(0x0a6ee0)),
             Theme::Graphite => (240.0, 0.04, hex(0x0a84ff)),
             Theme::Ocean => (187.0, 0.45, hex(0x35d0e0)),
             Theme::Forest => (149.0, 0.28, hex(0x4ade80)),
@@ -230,6 +247,10 @@ impl Theme {
             Theme::Windows => {
                 let accent = windows_accent().unwrap_or(hex(0x0a84ff));
                 let (h, s, l) = to_hsl(accent);
+                if windows_light_mode() {
+                    // Dark enough to read on the light background.
+                    return Palette::new(from_hsl(h, s.min(0.3), 0.95), from_hsl(h, s, l.min(0.45)));
+                }
                 // Light enough to read on the dark background.
                 let accent = from_hsl(h, s, l.max(0.62));
                 (h, s.min(0.4), accent)
@@ -246,6 +267,10 @@ pub struct Palette {
     pub accent: (f32, f32, f32),
     /// Text and icons on the accent.
     pub on_accent: (f32, f32, f32),
+    /// Text and icons on the background: white on dark themes, near-black on
+    /// light ones.
+    pub ink: (f32, f32, f32),
+    pub light: bool,
 }
 
 impl Palette {
@@ -253,7 +278,9 @@ impl Palette {
         let (h, _, _) = to_hsl(accent);
         let luminance = 0.2126 * accent.0 + 0.7152 * accent.1 + 0.0722 * accent.2;
         let on_accent = if luminance > 0.35 { from_hsl(h, 0.5, 0.08) } else { (1.0, 1.0, 1.0) };
-        Palette { surface, accent, on_accent }
+        let light = 0.2126 * surface.0 + 0.7152 * surface.1 + 0.0722 * surface.2 > 0.5;
+        let ink = if light { (0.11, 0.11, 0.12) } else { (1.0, 1.0, 1.0) };
+        Palette { surface, accent, on_accent, ink, light }
     }
 }
 
@@ -314,6 +341,27 @@ fn windows_accent() -> Option<(f32, f32, f32)> {
         .ok()?;
     }
     Some(((value & 0xff) as f32 / 255.0, ((value >> 8) & 0xff) as f32 / 255.0, ((value >> 16) & 0xff) as f32 / 255.0))
+}
+
+/// Whether Windows' apps are in light mode (Settings › Personalization › Colors).
+fn windows_light_mode() -> bool {
+    use windows::core::w;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+    let mut value = 0u32;
+    let mut size = 4u32;
+    let ok = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            w!(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"),
+            w!("AppsUseLightTheme"),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut value as *mut u32 as *mut _),
+            Some(&mut size),
+        )
+    }
+    .is_ok();
+    ok && value != 0
 }
 
 static PALETTE: Mutex<Option<(Theme, Palette)>> = Mutex::new(None);

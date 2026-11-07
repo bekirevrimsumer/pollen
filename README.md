@@ -49,6 +49,17 @@ Task Manager, one 1 MB program.
     <td align="center">Calendar</td>
     <td align="center">Closed: what is playing, the volume indicator</td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/notch-music-light.png" alt="Light theme: Music"></td>
+    <td><img src="docs/screenshots/notch-weather-latte.png" alt="Latte theme: Weather"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/notch-control-center-light.png" alt="Light theme: Control Center"></td>
+    <td><img src="docs/screenshots/notch-settings-mist.png" alt="Mist theme: Settings"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">Light themes: Light, Latte and Mist</td>
+  </tr>
 </table>
 
 The screenshots are rendered by Pollen itself with made-up data
@@ -153,8 +164,9 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Settings: the language (Auto follows Windows; Türkçe or English), the dock's mode,
   size and magnification, starting with Windows (off
   until turned on; a value under the user's `Run` key), the weather's place, the
-  theme (Nectar's dark presets: Gece/Midnight, Grafit, Okyanus, Orman, Erik, Gül,
-  Kor, or one that follows Windows' accent color), the background opacity of the
+  theme (Nectar's presets: Midnight, Graphite, Ocean, Forest, Plum, Rose, Ember;
+  the light Light, Latte and Mist; or Windows, which follows Windows' accent color
+  and its light or dark mode), the background opacity of the
   dock and the notch, and quitting Pollen. Changes apply at once and are saved
   in `%APPDATA%\Pollen\settings.txt`
 

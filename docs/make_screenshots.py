@@ -59,7 +59,17 @@ def crop_around(image, box, margin):
     return image.crop((max(0, left - margin), max(0, top - margin), min(W, right + margin), min(H, bottom + margin)))
 
 
+# Optional: python make_screenshots.py <folder> <suffix> <name> <name> ...
+# writes only those images, with the suffix (e.g. "-light" for a light theme).
+SUFFIX = sys.argv[2] if len(sys.argv) > 2 else ""
+ONLY = set(sys.argv[3:])
+
+
 def save(image, name, width=None):
+    stem, ext = os.path.splitext(name)
+    if ONLY and stem not in ONLY:
+        return
+    name = stem + SUFFIX + ext
     if width and image.width > width:
         image = image.resize((width, round(image.height * width / image.width)), Image.LANCZOS)
     path = os.path.join(OUT, name)

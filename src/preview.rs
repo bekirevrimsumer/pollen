@@ -127,6 +127,18 @@ fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
 }
 
+/// The theme's text and icon color (white on dark themes, near-black on
+/// light ones) at opacity `a`.
+fn ink_color(a: f32) -> D2D1_COLOR_F {
+    let (r, g, b) = crate::settings::palette().ink;
+    rgba(r, g, b, a)
+}
+
+/// White, whatever the theme: text on the dark tooltip bubbles and on red.
+fn pure_white(a: f32) -> D2D1_COLOR_F {
+    rgba(1.0, 1.0, 1.0, a)
+}
+
 /// The theme's background color.
 fn surface() -> (f32, f32, f32) {
     crate::settings::palette().surface
@@ -575,7 +587,7 @@ impl Preview {
     fn render_only(&mut self) {
         let s = self.scale;
         let a = self.fade.clamp(0.0, 1.0);
-        let white = |o: f32| rgba(1.0, 1.0, 1.0, o * a);
+        let ink = |o: f32| ink_color(o * a);
         let hovered = self.mouse.and_then(|(x, y)| self.hit(x, y));
         let rt = self.surface.rt.clone();
         unsafe {
@@ -590,7 +602,7 @@ impl Preview {
             let (r, g, b) = surface();
             let opacity = (settings::get().opacity + 0.05).min(1.0);
             self.fill_rounded(card, RADIUS * s, rgba(r, g, b, opacity * a));
-            self.brush.SetColor(&white(0.12));
+            self.brush.SetColor(&ink(0.12));
             let edge = rect(card.left + 0.5, card.top + 0.5, card.right - 0.5, card.bottom - 0.5);
             rt.DrawRoundedRectangle(
                 &D2D1_ROUNDED_RECT { rect: edge, radiusX: RADIUS * s, radiusY: RADIUS * s },
@@ -604,7 +616,7 @@ impl Preview {
                 let item_hot = matches!(hovered, Some(Hit::Item(j) | Hit::Close(j)) if j == i);
                 let pressed = self.pressed == Some(Hit::Item(i));
                 if item_hot {
-                    self.fill_rounded(item, 12.0 * s, white(if pressed { 0.16 } else { 0.10 }));
+                    self.fill_rounded(item, 12.0 * s, ink(if pressed { 0.16 } else { 0.10 }));
                 }
                 let thumb = self.thumb_rect(i);
                 self.fill_rounded(thumb, 8.0 * s, rgba(0.0, 0.0, 0.0, 0.45 * a));
@@ -621,13 +633,13 @@ impl Preview {
                 let title = if entry.title.is_empty() { &self.name } else { &entry.title };
                 let tx = item.left + ITEM_PAD * s + icon + 6.0 * s;
                 let (_, th) = self.text_size(title, &self.title_format);
-                self.text(title, &self.title_format, tx, ly + (LABEL_HEIGHT * s - th) / 2.0, white(0.9), item.right - ITEM_PAD * s - tx);
+                self.text(title, &self.title_format, tx, ly + (LABEL_HEIGHT * s - th) / 2.0, ink(0.9), item.right - ITEM_PAD * s - tx);
 
                 // The close button shows on the hovered card.
                 if item_hot {
                     let c = self.close_rect(i);
                     let close_hot = hovered == Some(Hit::Close(i));
-                    let bg = if close_hot { rgba(239.0 / 255.0, 68.0 / 255.0, 68.0 / 255.0, a) } else { rgba(0.0, 0.0, 0.0, 0.55 * a) };
+                    let bg = if close_hot { rgba(239.0 / 255.0, 68.0 / 255.0, 68.0 / 255.0, a) } else { ink(0.14) };
                     self.fill_rounded(c, CLOSE * s / 2.0, bg);
                     let glyph = ICON_CLOSE.to_string();
                     let (gw, gh) = self.text_size(&glyph, &self.close_format);
@@ -636,7 +648,7 @@ impl Preview {
                         &self.close_format,
                         (c.left + c.right - gw) / 2.0,
                         (c.top + c.bottom - gh) / 2.0,
-                        white(if close_hot { 1.0 } else { 0.8 }),
+                        if close_hot { pure_white(a) } else { ink(0.8) },
                         gw + 4.0,
                     );
                 }

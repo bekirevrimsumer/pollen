@@ -295,6 +295,18 @@ const fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
 }
 
+/// The theme's text and icon color (white on dark themes, near-black on
+/// light ones) at opacity `a`.
+fn ink_color(a: f32) -> D2D1_COLOR_F {
+    let (r, g, b) = crate::settings::palette().ink;
+    rgba(r, g, b, a)
+}
+
+/// White, whatever the theme: text on the dark tooltip bubbles and on red.
+fn pure_white(a: f32) -> D2D1_COLOR_F {
+    rgba(1.0, 1.0, 1.0, a)
+}
+
 /// The theme's background color.
 fn surface() -> (f32, f32, f32) {
     crate::settings::palette().surface
@@ -1619,7 +1631,7 @@ impl Dock {
                     );
                 }
                 // Nectar's divider: --nectar-border, white at 12%.
-                self.brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.12 * content));
+                self.brush.SetColor(&ink_color(0.12 * content));
                 for &x in &layout.separators {
                     let _ = rt.DrawLine(
                         pt(x, layout.icon_bottom - TILE * s + 6.0 * s),
@@ -1760,12 +1772,12 @@ impl Dock {
             self.fill_rounded(
                 rect(cx - r, cy - r, cx + r, cy + r),
                 7.0 * s,
-                rgba(1.0, 1.0, 1.0, if pressed { 0.16 } else { 0.10 } * content),
+                ink_color(if pressed { 0.16 } else { 0.10 } * content),
             );
         }
         let (half, rise) = (5.0 * s, 2.75 * s);
         unsafe {
-            self.brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.85 * content));
+            self.brush.SetColor(&ink_color(0.85 * content));
             let rt = &self.surface.rt;
             let _ = rt.DrawLine(pt(cx - half, cy + rise), pt(cx, cy - rise), &self.brush, 1.6 * s, None);
             let _ = rt.DrawLine(pt(cx, cy - rise), pt(cx + half, cy + rise), &self.brush, 1.6 * s, None);
@@ -1781,7 +1793,7 @@ impl Dock {
         let pressed = self.pressed == Some(Hit::Desktop);
         let cy = layout.icon_bottom - TILE * s / 2.0;
         unsafe {
-            self.brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.22 * content));
+            self.brush.SetColor(&ink_color(0.22 * content));
             let x = d.left + 1.0 * s;
             let _ = self.surface.rt.DrawLine(pt(x, cy - 9.0 * s), pt(x, cy + 9.0 * s), &self.brush, 1.0 * s, None);
         }
@@ -1792,13 +1804,13 @@ impl Dock {
             self.fill_rounded(
                 rect(cx - r, cy - r, cx + r, cy + r),
                 7.0 * s,
-                rgba(1.0, 1.0, 1.0, if pressed { 0.16 } else { 0.10 } * content),
+                ink_color(if pressed { 0.16 } else { 0.10 } * content),
             );
         }
         let glyph = ICON_DESKTOP.to_string();
         let (gw, gh) = self.text_size(&glyph, &self.glyph_format);
         let alpha = if hovered { 1.0 } else { 0.85 };
-        self.draw_text(&glyph, &self.glyph_format, pt(cx - gw / 2.0, cy - gh / 2.0), rgba(1.0, 1.0, 1.0, alpha * content));
+        self.draw_text(&glyph, &self.glyph_format, pt(cx - gw / 2.0, cy - gh / 2.0), ink_color(alpha * content));
     }
 
     fn draw_clock(&self, layout: &Layout, content: f32) {
@@ -1806,7 +1818,7 @@ impl Dock {
         let (tw, th) = self.text_size(&self.clock, &self.time_format);
         let pressed = if self.pressed == Some(Hit::Clock) { 0.6 } else { 1.0 };
         let origin = pt((c.left + c.right - tw) / 2.0, (c.top + c.bottom - th) / 2.0);
-        self.draw_text(&self.clock, &self.time_format, origin, rgba(1.0, 1.0, 1.0, 0.95 * content * pressed));
+        self.draw_text(&self.clock, &self.time_format, origin, ink_color(0.95 * content * pressed));
     }
 
     fn draw_text(&self, text: &str, format: &IDWriteTextFormat, origin: Vector2, color: D2D1_COLOR_F) {
@@ -1826,7 +1838,7 @@ impl Dock {
             &letter,
             &self.label_format,
             pt((r.left + r.right - w) / 2.0, (r.top + r.bottom - h) / 2.0),
-            rgba(1.0, 1.0, 1.0, 0.9 * opacity),
+            ink_color(0.9 * opacity),
         );
     }
 
@@ -1846,7 +1858,7 @@ impl Dock {
             text,
             &self.label_format,
             pt(left + (width - tw) / 2.0, top + (height - th) / 2.0),
-            rgba(1.0, 1.0, 1.0, alpha),
+            pure_white(alpha),
         );
     }
 

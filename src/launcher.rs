@@ -216,6 +216,13 @@ fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
 }
 
+/// The theme's text and icon color (white on dark themes, near-black on
+/// light ones) at opacity `a`.
+fn ink_color(a: f32) -> D2D1_COLOR_F {
+    let (r, g, b) = crate::settings::palette().ink;
+    rgba(r, g, b, a)
+}
+
 fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
     D2D_RECT_F { left, top, right, bottom }
 }
@@ -925,7 +932,7 @@ impl Launcher {
         let s = self.scale;
         let (sr, sg, sb) = crate::settings::palette().surface;
         let (ar, ag, ab) = crate::settings::palette().accent;
-        let white = |a: f32| rgba(1.0, 1.0, 1.0, a);
+        let ink = |a: f32| ink_color(a);
         let rows = self.results.len();
         let height = SEARCH_HEIGHT + if rows > 0 { PAD * 2.0 + ROW * rows as f32 } else { 0.0 };
         let card = rect(MARGIN * s, MARGIN * s, (MARGIN + WIDTH) * s, (MARGIN + height) * s);
@@ -943,7 +950,7 @@ impl Launcher {
                 self.fill_rounded(shadow, RADIUS * s + g, rgba(0.0, 0.0, 0.0, 0.05));
             }
             self.fill_rounded(card, RADIUS * s, rgba(sr, sg, sb, 0.97));
-            self.brush.SetColor(&white(0.12));
+            self.brush.SetColor(&ink(0.12));
             let edge = rect(card.left + 0.5, card.top + 0.5, card.right - 0.5, card.bottom - 0.5);
             rt.DrawRoundedRectangle(&D2D1_ROUNDED_RECT { rect: edge, radiusX: RADIUS * s, radiusY: RADIUS * s }, &self.brush, 1.0, None);
 
@@ -951,20 +958,20 @@ impl Launcher {
             let cy = card.top + SEARCH_HEIGHT * s / 2.0;
             let glyph = ICON_SEARCH.to_string();
             let (gw, gh) = self.text_size(&glyph, &self.glyph_format);
-            self.text(&glyph, &self.glyph_format, card.left + 30.0 * s - gw / 2.0, cy - gh / 2.0, white(0.6), gw + 4.0);
+            self.text(&glyph, &self.glyph_format, card.left + 30.0 * s - gw / 2.0, cy - gh / 2.0, ink(0.6), gw + 4.0);
             let x = card.left + 52.0 * s;
             if self.query.is_empty() {
                 let hint = t("Uygulama, dosya ara ya da hesapla…", "Search apps and files, or calculate…");
                 let (_, h) = self.text_size(hint, &self.input_format);
-                self.text(hint, &self.input_format, x + 2.0 * s, cy - h / 2.0, white(0.4), card.right - x - 20.0 * s);
+                self.text(hint, &self.input_format, x + 2.0 * s, cy - h / 2.0, ink(0.4), card.right - x - 20.0 * s);
             }
             let (qw, qh) = self.text_size(&self.query, &self.input_format);
             let qh = if self.query.is_empty() { self.text_size("A", &self.input_format).1 } else { qh };
-            self.text(&self.query, &self.input_format, x, cy - qh / 2.0, white(0.95), card.right - x - 20.0 * s);
+            self.text(&self.query, &self.input_format, x, cy - qh / 2.0, ink(0.95), card.right - x - 20.0 * s);
             let caret = (x + qw + 1.0 * s).min(card.right - 22.0 * s);
             self.fill_rounded(rect(caret, cy - 10.0 * s, caret + 2.0 * s, cy + 10.0 * s), 1.0 * s, rgba(ar, ag, ab, 1.0));
             if rows > 0 {
-                self.brush.SetColor(&white(0.08));
+                self.brush.SetColor(&ink(0.08));
                 let y = card.top + SEARCH_HEIGHT * s;
                 rt.DrawLine(Vector2 { X: card.left, Y: y }, Vector2 { X: card.right, Y: y }, &self.brush, 1.0, None);
             }
@@ -979,24 +986,24 @@ impl Launcher {
                 match &bitmaps[i] {
                     Some(bitmap) => rt.DrawBitmap(bitmap, Some(&icon), 1.0, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, None),
                     None => {
-                        self.fill_rounded(icon, 8.0 * s, white(0.08));
+                        self.fill_rounded(icon, 8.0 * s, ink(0.08));
                         let g = entry.glyph.to_string();
                         let (gw, gh) = self.text_size(&g, &self.glyph_format);
-                        self.text(&g, &self.glyph_format, (icon.left + icon.right - gw) / 2.0, (icon.top + icon.bottom - gh) / 2.0, white(0.85), gw + 4.0);
+                        self.text(&g, &self.glyph_format, (icon.left + icon.right - gw) / 2.0, (icon.top + icon.bottom - gh) / 2.0, ink(0.85), gw + 4.0);
                     }
                 }
                 let tx = icon.right + 12.0 * s;
                 let (_, th) = self.text_size(&entry.title, &self.title_format);
                 let (_, sh) = self.text_size(&entry.subtitle, &self.sub_format);
                 let top = r.top + (ROW * s - th - sh) / 2.0;
-                self.text(&entry.title, &self.title_format, tx, top, white(0.95), r.right - tx - 130.0 * s);
+                self.text(&entry.title, &self.title_format, tx, top, ink(0.95), r.right - tx - 130.0 * s);
                 let confirm = self.confirming == Some(i);
                 let subtitle = if confirm { t("Emin misin? Onaylamak için yine Enter", "Sure? Press Enter again") } else { entry.subtitle.as_str() };
-                self.text(subtitle, &self.sub_format, tx, top + th, if confirm { rgba(1.0, 0.62, 0.4, 1.0) } else { white(0.5) }, r.right - tx - 20.0 * s);
+                self.text(subtitle, &self.sub_format, tx, top + th, if confirm { rgba(1.0, 0.62, 0.4, 1.0) } else { ink(0.5) }, r.right - tx - 20.0 * s);
                 if i == self.selected {
                     let hint = "Enter ↵";
                     let (hw, hh) = self.text_size(hint, &self.sub_format);
-                    self.text(hint, &self.sub_format, r.right - 14.0 * s - hw, (r.top + r.bottom - hh) / 2.0, white(0.4), hw + 4.0);
+                    self.text(hint, &self.sub_format, r.right - 14.0 * s - hw, (r.top + r.bottom - hh) / 2.0, ink(0.4), hw + 4.0);
                 }
             }
             let _ = rt.EndDraw(None, None);

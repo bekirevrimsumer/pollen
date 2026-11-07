@@ -131,6 +131,11 @@ fn main() -> Result<()> {
                 s.language = settings::Language::English;
                 settings::set(s, false);
             }
+            if let Some(theme) = args.iter().position(|a| a == "--theme").and_then(|i| args.get(i + 1)).and_then(|t| settings::Theme::parse(t)) {
+                let mut s = settings::get();
+                s.theme = theme;
+                settings::set(s, false);
+            }
             dock::Dock::demo_shots(&dir)?;
             launcher::demo_shots(&dir)?;
             return notch::Notch::demo_shots(&dir);
