@@ -400,16 +400,6 @@ pub struct Settings {
     pub check_updates: bool,
     /// Show new Windows notifications on the notch for a moment.
     pub notifications: bool,
-    // Apply to Windows (Settings › Windows): light or dark mode and the
-    // accent color from the theme, window borders in the accent, title bars
-    // in the theme's background, window corners (0 Windows' own, 1 round,
-    // 2 slightly round, 3 square), and a wallpaper from the theme's colors.
-    pub win_mode: bool,
-    pub win_accent: bool,
-    pub win_borders: bool,
-    pub win_titles: bool,
-    pub win_corners: u8,
-    pub win_wallpaper: bool,
 }
 
 impl Default for Settings {
@@ -423,12 +413,6 @@ impl Default for Settings {
             language: Language::Auto,
             check_updates: true,
             notifications: true,
-            win_mode: false,
-            win_accent: false,
-            win_borders: false,
-            win_titles: false,
-            win_corners: 0,
-            win_wallpaper: false,
         }
     }
 }
@@ -454,12 +438,6 @@ fn read_file() -> Settings {
             "language" => settings.language = Language::parse(value).unwrap_or(settings.language),
             "check-updates" => settings.check_updates = value.trim() != "off",
             "notifications" => settings.notifications = value.trim() != "off",
-            "windows-mode" => settings.win_mode = value.trim() == "on",
-            "windows-accent" => settings.win_accent = value.trim() == "on",
-            "windows-borders" => settings.win_borders = value.trim() == "on",
-            "windows-titles" => settings.win_titles = value.trim() == "on",
-            "windows-corners" => settings.win_corners = value.trim().parse().unwrap_or(0).min(3),
-            "windows-wallpaper" => settings.win_wallpaper = value.trim() == "on",
             "opacity" => {
                 if let Ok(v) = value.trim().parse::<f32>() {
                     settings.opacity = (v / 100.0).clamp(MIN_OPACITY, 1.0);
@@ -548,7 +526,7 @@ pub fn write_file(settings: &Settings) {
         let _ = std::fs::write(
             p,
             format!(
-                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\nnotifications={}\nwindows-mode={}\nwindows-accent={}\nwindows-borders={}\nwindows-titles={}\nwindows-corners={}\nwindows-wallpaper={}\n",
+                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\nnotifications={}\n",
                 settings.dock_mode.key(),
                 settings.dock_size.key(),
                 settings.magnify.key(),
@@ -556,13 +534,7 @@ pub fn write_file(settings: &Settings) {
                 settings.theme.key(),
                 settings.language.key(),
                 if settings.check_updates { "on" } else { "off" },
-                if settings.notifications { "on" } else { "off" },
-                if settings.win_mode { "on" } else { "off" },
-                if settings.win_accent { "on" } else { "off" },
-                if settings.win_borders { "on" } else { "off" },
-                if settings.win_titles { "on" } else { "off" },
-                settings.win_corners,
-                if settings.win_wallpaper { "on" } else { "off" }
+                if settings.notifications { "on" } else { "off" }
             ),
         );
     }

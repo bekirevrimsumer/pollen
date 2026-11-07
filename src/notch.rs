@@ -157,8 +157,6 @@ const ICON_MUTE: char = '\u{E74F}';
 const ICON_BRIGHTNESS: char = '\u{E706}';
 const ICON_BELL: char = '\u{EA8F}';
 const ICON_HEADPHONES: char = '\u{E7F6}';
-const ICON_WINDOW: char = '\u{E737}';
-const ICON_PICTURE: char = '\u{E8B9}';
 const ICON_GEAR: char = '\u{E713}';
 const ICON_DISPLAY: char = '\u{E7F4}';
 const ICON_PREVIOUS: char = '\u{E892}';
@@ -316,20 +314,9 @@ enum Choice {
     Language,
     Updates,
     Notifications,
-    // Settings › Windows
-    WinMode,
-    WinAccent,
-    WinBorders,
-    WinTitles,
-    WinCorners,
-    WinWallpaper,
 }
 
 impl Choice {
-    /// The second page: the theme carried over to Windows.
-    const WINDOWS: [Choice; 6] =
-        [Choice::WinMode, Choice::WinAccent, Choice::WinBorders, Choice::WinTitles, Choice::WinCorners, Choice::WinWallpaper];
-
     const ALL: [Choice; 7] = [
         Choice::Mode,
         Choice::Size,
@@ -349,12 +336,6 @@ impl Choice {
             Choice::Language => ICON_LANGUAGE,
             Choice::Updates => ICON_UPDATE,
             Choice::Notifications => ICON_BELL,
-            Choice::WinMode => ICON_MOON,
-            Choice::WinAccent => ICON_COLOR,
-            Choice::WinBorders => ICON_WINDOW,
-            Choice::WinTitles => ICON_DISPLAY,
-            Choice::WinCorners => ICON_SIZE,
-            Choice::WinWallpaper => ICON_PICTURE,
         }
     }
 
@@ -367,12 +348,6 @@ impl Choice {
             Choice::Language => t("Dil", "Language"),
             Choice::Updates => t("Güncellemeler", "Updates"),
             Choice::Notifications => t("Bildirimler", "Notifications"),
-            Choice::WinMode => t("Açık/koyu mod", "Light/dark mode"),
-            Choice::WinAccent => t("Vurgu rengi", "Accent color"),
-            Choice::WinBorders => t("Kenarlar", "Window borders"),
-            Choice::WinTitles => t("Başlık çubukları", "Title bars"),
-            Choice::WinCorners => t("Köşeler", "Corners"),
-            Choice::WinWallpaper => t("Duvar kâğıdı", "Wallpaper"),
         }
     }
 
@@ -385,11 +360,6 @@ impl Choice {
             Choice::Language => settings::Language::ALL.map(|l| l.label()).to_vec(),
             Choice::Updates => vec![t("Kapalı", "Off"), t("Denetle", "Check")],
             Choice::Notifications => vec![t("Kapalı", "Off"), t("Notch'ta göster", "Show on the notch")],
-            Choice::WinMode | Choice::WinAccent => vec![t("Kapalı", "Off"), t("Temaya uy", "Follow the theme")],
-            Choice::WinBorders => vec![t("Kapalı", "Off"), t("Vurgu rengi", "Accent")],
-            Choice::WinTitles => vec![t("Kapalı", "Off"), t("Tema rengi", "Theme color")],
-            Choice::WinCorners => vec!["Windows", t("Yuvarlak", "Round"), t("Az", "Slight"), t("Köşeli", "Square")],
-            Choice::WinWallpaper => vec![t("Kapalı", "Off"), t("Temadan", "From the theme")],
         }
     }
 
@@ -403,12 +373,6 @@ impl Choice {
             Choice::Language => settings::Language::ALL.iter().position(|l| *l == s.language),
             Choice::Updates => Some(s.check_updates as usize),
             Choice::Notifications => Some(s.notifications as usize),
-            Choice::WinMode => Some(s.win_mode as usize),
-            Choice::WinAccent => Some(s.win_accent as usize),
-            Choice::WinBorders => Some(s.win_borders as usize),
-            Choice::WinTitles => Some(s.win_titles as usize),
-            Choice::WinCorners => Some(s.win_corners as usize),
-            Choice::WinWallpaper => Some(s.win_wallpaper as usize),
         }
         .unwrap_or(0)
     }
@@ -422,12 +386,6 @@ impl Choice {
             Choice::Language => s.language = settings::Language::ALL[i],
             Choice::Updates => s.check_updates = i == 1,
             Choice::Notifications => s.notifications = i == 1,
-            Choice::WinMode => s.win_mode = i == 1,
-            Choice::WinAccent => s.win_accent = i == 1,
-            Choice::WinBorders => s.win_borders = i == 1,
-            Choice::WinTitles => s.win_titles = i == 1,
-            Choice::WinCorners => s.win_corners = i as u8,
-            Choice::WinWallpaper => s.win_wallpaper = i == 1,
         }
     }
 }
@@ -471,9 +429,6 @@ enum Control {
     /// Timer tab: the mode (timer, stopwatch, pomodoro), a length in
     /// minutes, start or pause, reset.
     ClockMode(usize),
-    /// Settings: to the Windows page and back.
-    WindowsPage,
-    SettingsBack,
     ClockPreset(u32),
     ClockStart,
     ClockReset,
@@ -682,8 +637,6 @@ pub struct Notch {
     banner: Option<Banner>,
     banner_room: Spring,
     clockwork: Clockwork,
-    /// The Settings tab's page: 0 the main one, 1 Windows.
-    settings_page: u8,
     /// What the closed island showed for it last, to redraw only on change.
     clockwork_text: String,
     /// The volume indicator's share of the closed island (0..1).
@@ -810,7 +763,6 @@ impl Notch {
                 banner: None,
                 banner_room: Spring::new(0.0),
                 clockwork: Clockwork::default(),
-                settings_page: 0,
                 clockwork_text: String::new(),
                 osd_room: Spring::new(0.0),
                 volume_watch: None,
@@ -1193,14 +1145,9 @@ impl Notch {
             }
             CALENDAR_TAB => return PAD * 0.7 + 28.0 + 6.0 + 18.0 + 6.0 * 28.0 + PAD * 0.6,
             TIMER_TAB => return PAD * 0.7 + CHOICE_HEIGHT + 14.0 + 56.0 + 22.0 + 12.0 + 28.0 + 16.0 + 34.0 + PAD * 0.8,
-            SETTINGS_TAB if self.settings_page == 1 => {
-                // The back row, the choices, a note.
-                let rows = Choice::WINDOWS.len() as f32 + 1.0;
-                return PAD * 0.7 + rows * (CHOICE_HEIGHT + 10.0) + 30.0 + PAD * 0.8;
-            }
             SETTINGS_TAB => {
-                // The choices, the weather's place, the theme and Windows.
-                let rows = Choice::ALL.len() as f32 + 3.0;
+                // The choices, the weather's place and the theme.
+                let rows = Choice::ALL.len() as f32 + 2.0;
                 return PAD * 0.7
                     + rows * (CHOICE_HEIGHT + 10.0)
                     + self.city_list_height()
@@ -1477,24 +1424,6 @@ impl Notch {
             list.push((rect(mid - 70.0 * s, y, mid + 70.0 * s, y + 28.0 * s), Control::CalendarTitle));
             return list;
         }
-        if self.tab == SETTINGS_TAB && self.settings_page == 1 {
-            let left = island.left + PAD * s;
-            let right = island.right - PAD * s;
-            let mut y = island.top + BAR * s + PAD * 0.7 * s;
-            let x0 = left + LABEL_WIDTH * s;
-            list.push((rect(left, y, left + 110.0 * s, y + CHOICE_HEIGHT * s), Control::SettingsBack));
-            y += (CHOICE_HEIGHT + 10.0) * s;
-            for choice in Choice::WINDOWS {
-                let n = choice.options().len();
-                let w = (right - x0) / n as f32;
-                for i in 0..n {
-                    let x = x0 + i as f32 * w;
-                    list.push((rect(x, y, x + w, y + CHOICE_HEIGHT * s), Control::Choice(choice, i)));
-                }
-                y += (CHOICE_HEIGHT + 10.0) * s;
-            }
-            return list;
-        }
         if self.tab == SETTINGS_TAB {
             let left = island.left + PAD * s;
             let right = island.right - PAD * s;
@@ -1532,8 +1461,6 @@ impl Notch {
                 let top = y + (CHOICE_HEIGHT * s - d) / 2.0;
                 list.push((rect(x, top, x + d, top + d), Control::Theme(i)));
             }
-            y += (CHOICE_HEIGHT + 10.0) * s;
-            list.push((rect(x0, y, right, y + CHOICE_HEIGHT * s), Control::WindowsPage));
             y += (CHOICE_HEIGHT + 10.0) * s;
             let icon = rect(left, y, left + 18.0 * s, y + SLIDER_HEIGHT * s);
             list.push((icon, Control::SliderIcon(Slider::Opacity)));
@@ -2111,32 +2038,6 @@ impl Notch {
         }
     }
 
-    /// Settings › Windows: the rows' titles and a note.
-    fn draw_windows_page(&self, island: D2D_RECT_F, alpha: f32) {
-        let s = self.scale;
-        let ink = |a: f32| ink_color(a * alpha);
-        let left = island.left + PAD * s;
-        let right = island.right - PAD * s;
-        let mut y = island.top + BAR * s + PAD * 0.7 * s;
-        let title = t("Windows'a uygula", "Apply to Windows");
-        let (tw, th) = self.text_size(title, &self.title_format);
-        self.text(title, &self.title_format, pt(right - tw, y + (CHOICE_HEIGHT * s - th) / 2.0), ink(0.55), tw + 4.0);
-        y += (CHOICE_HEIGHT + 10.0) * s;
-        for choice in Choice::WINDOWS {
-            let cy = y + CHOICE_HEIGHT * s / 2.0;
-            self.icon(choice.icon(), &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), ink(0.8));
-            let (_, th) = self.text_size(choice.title(), &self.title_format);
-            self.text(choice.title(), &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), ink(0.9), LABEL_WIDTH * s - 30.0 * s);
-            y += (CHOICE_HEIGHT + 10.0) * s;
-        }
-        let note = t(
-            "Kapatınca kendi ayarın geri gelir. Pencere renkleri Pollen açıkken geçerli.",
-            "Turning one off brings your own setting back. Window colors last while Pollen runs.",
-        );
-        let (_, nh) = self.text_size(note, &self.small_format);
-        self.text(note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), ink(0.45), right - left);
-    }
-
     /// The Weather tab: now, the coming hours and the coming days.
     fn draw_weather(&self, island: D2D_RECT_F, alpha: f32) {
         let s = self.scale;
@@ -2253,10 +2154,6 @@ impl Notch {
     /// The Calendar tab: a Monday-first month grid with today marked.
     /// The Settings tab's row titles and a note; the options are controls.
     fn draw_settings(&self, island: D2D_RECT_F, alpha: f32) {
-        if self.settings_page == 1 {
-            self.draw_windows_page(island, alpha);
-            return;
-        }
         let s = self.scale;
         let ink = |a: f32| ink_color(a * alpha);
         let left = island.left + PAD * s;
@@ -2292,11 +2189,6 @@ impl Notch {
         let title = if self.text_size(&named, &self.title_format).0 <= room { named } else { t("Tema", "Theme").to_string() };
         let (_, th) = self.text_size(&title, &self.title_format);
         self.text(&title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), ink(0.9), LABEL_WIDTH * s - 30.0 * s);
-        y += (CHOICE_HEIGHT + 10.0) * s;
-        let cy = y + CHOICE_HEIGHT * s / 2.0;
-        self.icon(ICON_WINDOW, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), ink(0.8));
-        let (_, th) = self.text_size("Windows", &self.title_format);
-        self.text("Windows", &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), ink(0.9), LABEL_WIDTH * s - 30.0 * s);
         y += (CHOICE_HEIGHT + 10.0) * s;
         y += (SLIDER_HEIGHT + 16.0) * s;
         match crate::update::available() {
@@ -2740,16 +2632,6 @@ impl Notch {
                     self.text(&place.region, &self.small_format, pt(rx, cy - rh / 2.0), ink(0.5), r.right - 8.0 * s - rx);
                 }
                 Control::Update => {}
-                Control::WindowsPage | Control::SettingsBack => {
-                    let back = control == Control::SettingsBack;
-                    let hot = hovered == Some(control.clone());
-                    let radius = (r.bottom - r.top) / 2.0;
-                    self.fill_rounded(r, radius, ink(if hot { 0.11 } else { 0.06 }));
-                    let label = if back { t("‹ Ayarlar", "‹ Settings") } else { t("Windows'a uygula ›", "Apply to Windows ›") };
-                    let (lw, lh) = self.text_size(label, &self.title_format);
-                    let x = if back { r.left + 12.0 * s } else { r.left + 12.0 * s };
-                    self.text(label, &self.title_format, pt(x, (r.top + r.bottom - lh) / 2.0), ink(if hot { 1.0 } else { 0.85 }), lw + 4.0);
-                }
                 Control::ClockMode(i) => {
                     let selected = self.clockwork.mode == ClockMode::ALL[i];
                     let hot = hovered == Some(Control::ClockMode(i));
@@ -3125,7 +3007,6 @@ impl Notch {
             Control::Tab(i) => {
                 if TABS[i].1 && self.tab != i {
                     self.end_city_edit(true);
-                    self.settings_page = 0;
                     self.tab = i;
                     if i == STATUS_TAB {
                         self.stats = self.sampler.sample();
@@ -3191,14 +3072,6 @@ impl Notch {
                 }
             }
             Control::Quit => crate::dock::quit(),
-            Control::WindowsPage => {
-                self.settings_page = 1;
-                self.sync_panel_height(true);
-            }
-            Control::SettingsBack => {
-                self.settings_page = 0;
-                self.sync_panel_height(true);
-            }
             Control::ClockMode(i) => {
                 if self.clockwork.mode != ClockMode::ALL[i] {
                     self.clockwork.reset();
@@ -3389,16 +3262,6 @@ impl Notch {
             n.render();
             save(&n, name)?;
         }
-        n.tab = SETTINGS_TAB;
-        n.settings_page = 1;
-        n.settings.win_mode = true;
-        n.settings.win_borders = true;
-        n.settings.win_corners = 1;
-        n.sync_panel_height(false);
-        n.render();
-        save(&n, "settings-windows")?;
-        n.settings_page = 0;
-        n.settings = settings::get();
         // The timer: running with 4:32 left, in its tab and on the closed island.
         n.clockwork.mode = ClockMode::Timer;
         n.clockwork.length = Duration::from_secs(5 * 60);
