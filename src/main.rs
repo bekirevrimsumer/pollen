@@ -7,6 +7,7 @@ mod dock;
 mod icons;
 mod notch;
 mod pacer;
+mod preview;
 mod render;
 mod settings;
 mod shell;

@@ -120,6 +120,9 @@ const TIMER_POLL: usize = 3;
 const TIMER_CLOCK: usize = 4;
 const TIMER_WINDOWS_MOVED: usize = 5;
 const TIMER_HIDE: usize = 6;
+const TIMER_PREVIEW: usize = 7;
+/// Nectar's default delay before the window previews open.
+const PREVIEW_DELAY_MS: u32 = 300;
 
 const CMD_OPEN: usize = 1;
 const CMD_CLOSE: usize = 2;
@@ -134,6 +137,8 @@ const WM_APPBAR: u32 = WM_APP + 1;
 const WM_PRESS_TRAY: u32 = WM_APP + 9;
 /// The settings changed (`settings::set`).
 const WM_SETTINGS_CHANGED: u32 = WM_APP + 10;
+/// The mouse left the window previews.
+const WM_PREVIEW_LEFT: u32 = WM_APP + 11;
 const ABN_POSCHANGED: usize = 1;
 const ABN_FULLSCREENAPP: usize = 2;
 
@@ -157,6 +162,17 @@ pub fn quit() {
     if hwnd != 0 {
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), windows::Win32::UI::WindowsAndMessaging::WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// The window previews tell the dock the mouse left them, so it can hide
+/// (Smart and Peek) as if the mouse had left the dock.
+pub fn preview_left() {
+    let hwnd = DOCK_HWND.load(Ordering::Relaxed);
+    if hwnd != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_PREVIEW_LEFT, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -370,6 +386,8 @@ pub struct Dock {
     covered: bool,
     /// Smart and Peek: the mouse left only a moment ago.
     lingering: bool,
+    /// The hovered app whose window previews are due or up.
+    preview_for: Option<String>,
     hidden_for_fullscreen: bool,
     clock: String,
     clock_width: f32,
@@ -464,6 +482,7 @@ impl Dock {
                 shown: false,
                 covered: false,
                 lingering: false,
+                preview_for: None,
                 hidden_for_fullscreen: false,
                 clock: String::new(),
                 clock_width: 0.0,
@@ -730,7 +749,7 @@ impl Dock {
     }
 
     fn wants_to_show(&self) -> bool {
-        let engaged = self.mouse.is_some() || self.lingering;
+        let engaged = self.mouse.is_some() || self.lingering || crate::preview::is_hovered();
         match self.settings.dock_mode {
             DockMode::Fixed => true,
             DockMode::Smart => engaged || !self.covered,
@@ -768,6 +787,9 @@ impl Dock {
             return;
         }
         self.shown = show;
+        if !show {
+            crate::preview::hide_now();
+        }
         if show {
             self.drop.target = 0.0;
             self.expand.target = 1.0;
@@ -1117,7 +1139,55 @@ impl Dock {
         if hovered != self.label.map(|(i, _)| i) {
             self.label = hovered.map(|i| (i, Instant::now()));
         }
+        self.update_preview(hovered);
         self.start_animation();
+    }
+
+    /// Window previews: after a short hover over a running app, or at once
+    /// when moving from one app to another while previews are up.
+    fn update_preview(&mut self, hovered: Option<usize>) {
+        if self.headless {
+            return;
+        }
+        let target = hovered
+            .filter(|&i| self.items[i].kind == Kind::App && !self.items[i].windows.is_empty())
+            .map(|i| self.items[i].key.clone());
+        if target == self.preview_for {
+            return;
+        }
+        self.preview_for = target.clone();
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_PREVIEW);
+        }
+        match target {
+            Some(key) if crate::preview::shown_key().is_some() => self.show_preview(&key),
+            Some(_) => unsafe {
+                SetTimer(Some(self.hwnd), TIMER_PREVIEW, PREVIEW_DELAY_MS, None);
+            },
+            None => crate::preview::hide_soon(),
+        }
+    }
+
+    fn show_preview(&mut self, key: &str) {
+        let Some(i) = self.items.iter().position(|item| item.key == key) else { return };
+        if self.items[i].windows.is_empty() || !self.interactive() {
+            return;
+        }
+        let layout = self.layout(true);
+        let Some(slot) = layout.slots.get(i) else { return };
+        let s = self.scale;
+        let top = layout.icon_bottom - TILE * self.max_scale() * s - 6.0 * s;
+        let item = &self.items[i];
+        crate::preview::show(crate::preview::Request {
+            key: item.key.clone(),
+            name: item.name.clone(),
+            icon_source: item.icon_source.clone(),
+            windows: item.windows.clone(),
+            anchor: (self.origin.0 + (slot.x + slot.size / 2.0) as i32, self.origin.1 + top as i32),
+            monitor: self.monitor,
+        });
+        // The previews replace the tooltip.
+        self.label = None;
     }
 
     fn start_animation(&mut self) {
@@ -1576,6 +1646,7 @@ impl Dock {
     }
 
     fn activate(&mut self, hit: Hit) {
+        crate::preview::hide_now();
         match hit {
             Hit::Clock => shell::open_notifications(),
             Hit::Tray => {
@@ -1728,6 +1799,7 @@ impl Dock {
         dock.widen.target = 1.0;
         step(&mut dock, 50);
         save(&dock, "7-full-width");
+        crate::preview::snapshot(dir)?;
         crate::notch::Notch::snapshot(dir)
     }
 }
@@ -1883,6 +1955,7 @@ unsafe extern "system" fn win_event(
 }
 
 unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
+    crate::preview::hide_now();
     let hwnd = (*dock).hwnd;
     let mode = (*dock).settings.dock_mode;
     let index = match hit {
@@ -2046,6 +2119,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     dock.update_fullscreen();
                     dock.update_window_state();
                 }
+                TIMER_PREVIEW => {
+                    let _ = KillTimer(Some(hwnd), TIMER_PREVIEW);
+                    if let Some(key) = dock.preview_for.clone() {
+                        dock.show_preview(&key);
+                    }
+                }
                 TIMER_HIDE => {
                     let _ = KillTimer(Some(hwnd), TIMER_HIDE);
                     dock.lingering = false;
@@ -2067,6 +2146,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_PRESS_TRAY => {
             (*ptr).activate(Hit::Tray);
+            LRESULT(0)
+        }
+        WM_PREVIEW_LEFT => {
+            let dock = &mut *ptr;
+            if dock.mouse.is_none() && dock.settings.dock_mode != DockMode::Fixed {
+                dock.lingering = true;
+                SetTimer(Some(hwnd), TIMER_HIDE, HIDE_DELAY_MS, None);
+            }
             LRESULT(0)
         }
         WM_SETTINGS_CHANGED => {

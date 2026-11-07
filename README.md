@@ -29,6 +29,9 @@ Direct2D. No WebView, no GPU device, no background polling: about 16 MB in Task 
 - Start button and a clock (click: notifications and calendar)
 - Click to open, click a running app to focus it, again to minimize, or to cycle its windows
 - Right-click menu: new window, close windows, mode, quit
+- Window previews (Nectar's): hovering a running app shows a live thumbnail of
+  each of its windows, with its title; click one to switch to it, close it with
+  its × (or a middle click). Minimized windows show the app's icon
 - Hides while a fullscreen window is the top window on its monitor, even when the
   focus is on another monitor
 - Per-monitor DPI
@@ -72,7 +75,7 @@ pollen.exe --restore-taskbar
 ## Not yet
 
 - Monitors other than the primary
-- Window previews, drag to reorder, choosing the weather's city
+- Drag to reorder, choosing the weather's city
 
 ## Build
 
