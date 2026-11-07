@@ -2,9 +2,12 @@
 //! (ipwho.is, falling back to geojs.io), then the weather for it from Open-Meteo.
 //! Refreshed every 30 minutes on a worker thread.
 //!
-//! This sends the computer's public IP address to the location service. A city
-//! chosen by hand can replace that once there is a settings window.
+//! That sends the computer's public IP address to the location service. A
+//! place picked by hand in the notch's Settings tab (found with Open-Meteo's
+//! geocoding) replaces the IP lookup; it is kept in
+//! `%APPDATA%\Pollen\weather-place.txt`.
 
+use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -49,6 +52,95 @@ impl Weather {
 }
 
 static WEATHER: Mutex<Option<Weather>> = Mutex::new(None);
+/// Wakes the worker to read the weather again now.
+static WAKE: Mutex<Option<Sender<()>>> = Mutex::new(None);
+
+/// A place to read the weather for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Place {
+    pub name: String,
+    /// "Kayseri, Türkiye": where it is, for telling places apart.
+    pub region: String,
+    pub latitude: f64,
+    pub longitude: f64,
+}
+
+fn place_path() -> Option<std::path::PathBuf> {
+    let dir = std::path::PathBuf::from(std::env::var_os("APPDATA")?).join("Pollen");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("weather-place.txt"))
+}
+
+/// The place picked by hand, if any.
+pub fn saved_place() -> Option<Place> {
+    let text = std::fs::read_to_string(place_path()?).ok()?;
+    let mut parts = text.trim().split('|');
+    let name = parts.next()?.to_string();
+    let region = parts.next()?.to_string();
+    let latitude = parts.next()?.parse().ok()?;
+    let longitude = parts.next()?.parse().ok()?;
+    Some(Place { name, region, latitude, longitude })
+}
+
+/// Picks a place by hand, or goes back to the IP location with `None`, and
+/// reads the weather again.
+pub fn set_place(place: Option<&Place>) {
+    if let Some(path) = place_path() {
+        match place {
+            Some(p) => {
+                let clean = |s: &str| s.replace(['|', '\n', '\r'], " ");
+                let _ = std::fs::write(path, format!("{}|{}|{}|{}", clean(&p.name), clean(&p.region), p.latitude, p.longitude));
+            }
+            None => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    if let Ok(mut w) = WEATHER.lock() {
+        *w = None;
+    }
+    if let Some(wake) = WAKE.lock().ok().and_then(|w| w.clone()) {
+        let _ = wake.send(());
+    }
+}
+
+/// Places matching a name, best first (Open-Meteo geocoding, in Turkish).
+pub fn search(name: &str) -> Vec<Place> {
+    let query: String = name
+        .trim()
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b' ' => "+".to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let url = format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=4&language=tr&format=json");
+    let Some(j) = get_json(&url) else { return Vec::new() };
+    let Some(results) = j["results"].as_array() else { return Vec::new() };
+    results
+        .iter()
+        .filter_map(|r| {
+            let name = r["name"].as_str()?.to_string();
+            let mut region: Vec<&str> = Vec::new();
+            if let Some(a) = r["admin1"].as_str().filter(|a| *a != name) {
+                region.push(a);
+            }
+            if let Some(c) = r["country"].as_str() {
+                region.push(if c == "Türkiye Cumhuriyeti" { "Türkiye" } else { c });
+            }
+            Some(Place {
+                region: region.join(", "),
+                name,
+                latitude: number(&r["latitude"])?,
+                longitude: number(&r["longitude"])?,
+            })
+        })
+        .collect()
+}
 
 pub fn current() -> Option<Weather> {
     WEATHER.lock().ok().and_then(|w| w.clone())
@@ -63,9 +155,16 @@ pub fn start(notify: HWND, message: u32) {
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
             }
+            let (wake, woken) = channel();
+            if let Ok(mut w) = WAKE.lock() {
+                *w = Some(wake);
+            }
             let mut place: Option<(f64, f64, String)> = None;
             loop {
-                if place.is_none() {
+                // A place picked by hand wins over the IP location.
+                if let Some(p) = saved_place() {
+                    place = Some((p.latitude, p.longitude, p.name));
+                } else if place.is_none() {
                     place = locate();
                 }
                 let ok = match &place {
@@ -83,9 +182,10 @@ pub fn start(notify: HWND, message: u32) {
                     },
                     None => false,
                 };
-                // Try again sooner when offline or a service failed.
-                std::thread::sleep(Duration::from_secs(if ok { 30 * 60 } else { 5 * 60 }));
-                if !ok {
+                // Try again sooner when offline or a service failed; a new
+                // place wakes the worker at once.
+                let woke = woken.recv_timeout(Duration::from_secs(if ok { 30 * 60 } else { 5 * 60 })).is_ok();
+                if !ok || woke {
                     place = None;
                 }
             }
@@ -95,7 +195,10 @@ pub fn start(notify: HWND, message: u32) {
 
 /// Locates and reads the weather once, on this thread (for `pollen --controls`).
 pub fn check() -> Option<Weather> {
-    let (lat, lon, city) = locate()?;
+    let (lat, lon, city) = match saved_place() {
+        Some(p) => (p.latitude, p.longitude, p.name),
+        None => locate()?,
+    };
     fetch(lat, lon, &city)
 }
 

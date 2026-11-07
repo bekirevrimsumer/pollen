@@ -58,13 +58,14 @@ Direct2D. No WebView, no GPU device, no background polling: about 16 MB in Task 
   weather on the left, the time in the middle and the date on the right
 - Calendar: a plain month view (Monday first), today highlighted, previous / next
   month. No accounts or calendar sync
-- Settings: the dock's mode, size and magnification, the background opacity of
-  the dock and the notch, and quitting Pollen. Changes apply at once and are saved
+- Settings: the dock's mode, size and magnification, the weather's place, the
+  background opacity of the dock and the notch, and quitting Pollen. Changes apply at once and are saved
   in `%APPDATA%\Pollen\settings.txt`
 
 The weather comes from [Open-Meteo](https://open-meteo.com/) for a rough location
 looked up from the computer's public IP address (ipwho.is, falling back to
-geojs.io), refreshed every 30 minutes. Choosing a city by hand is still to come.
+geojs.io), refreshed every 30 minutes. A place typed in the Settings tab (found
+with Open-Meteo's geocoding) replaces the IP lookup; "Otomatik" goes back to it.
 
 ## Getting the taskbar back
 
@@ -78,7 +79,6 @@ pollen.exe --restore-taskbar
 ## Not yet
 
 - Monitors other than the primary
-- Choosing the weather's city
 
 ## Build
 

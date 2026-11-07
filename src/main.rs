@@ -73,6 +73,12 @@ fn main() -> Result<()> {
             .ok()
             .flatten();
             println!("weather: {place:?}");
+            if let Some(i) = args.iter().position(|a| a == "--city") {
+                let name = args.get(i + 1).cloned().unwrap_or_default();
+                for p in controls::weather::search(&name) {
+                    println!("place: {} ({}) {:.3}, {:.3}", p.name, p.region, p.latitude, p.longitude);
+                }
+            }
             let mut meter = controls::audio::Meter::new();
             println!("peaks: {:?}", meter.peaks());
             return Ok(());

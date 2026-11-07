@@ -43,10 +43,10 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_LWIN,
+    ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_LWIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, KillTimer, LoadCursorW, RegisterClassExW, SetTimer,
+    CreateWindowExW, DefWindowProcW, GetForegroundWindow, GetWindowLongPtrW, SetForegroundWindow, GWL_EXSTYLE, KillTimer, LoadCursorW, RegisterClassExW, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED,
     WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
@@ -98,6 +98,8 @@ const ART: f32 = 76.0;
 /// CPU / memory / disk / network readings: every second in the Status tab,
 /// every few seconds for the closed island's CPU figure.
 const TIMER_STATS: usize = 5;
+/// Searches for the typed place a moment after the typing stops.
+const TIMER_SEARCH: usize = 6;
 
 /// Posted by the display worker when monitors or values change.
 const WM_DISPLAYS: u32 = WM_APP + 4;
@@ -109,6 +111,13 @@ const WM_MEDIA: u32 = WM_APP + 6;
 const WM_WEATHER: u32 = WM_APP + 7;
 /// The settings changed (`settings::set`).
 const WM_SETTINGS_CHANGED: u32 = WM_APP + 8;
+/// A place search finished (`SEARCH`).
+const WM_PLACES: u32 = WM_APP + 9;
+const WM_CHAR: u32 = 0x0102;
+const WM_ACTIVATE: u32 = 0x0006;
+
+/// The latest place search: its number and what it found.
+static SEARCH: std::sync::Mutex<Option<(u64, Vec<weather::Place>)>> = std::sync::Mutex::new(None);
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 // Segoe Fluent Icons.
@@ -144,6 +153,9 @@ const ICON_SIZE: char = '\u{E740}';
 const ICON_ZOOM: char = '\u{E71E}';
 const ICON_COLOR: char = '\u{E790}';
 const ICON_POWER: char = '\u{E7E8}';
+const ICON_PLACE: char = '\u{E81D}';
+/// A place search result's row.
+const RESULT_HEIGHT: f32 = 28.0;
 
 const MONTHS: [&str; 12] =
     ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
@@ -308,6 +320,20 @@ enum Control {
     /// One option of a Settings row.
     Choice(Choice, usize),
     Quit,
+    /// The weather's place: click to type a city.
+    CityField,
+    /// Back to the place from the IP address.
+    CityAuto,
+    CityResult(usize),
+}
+
+/// Typing a city in the Settings tab.
+struct CityEdit {
+    text: String,
+    results: Vec<weather::Place>,
+    searching: bool,
+    /// The window that had the focus before typing started.
+    previous: HWND,
 }
 
 /// Tabs: (icon, available yet).
@@ -382,6 +408,10 @@ pub struct Notch {
     big_format: IDWriteTextFormat,
     big_icon_format: IDWriteTextFormat,
     weather: Option<weather::Weather>,
+    /// The weather's place picked by hand.
+    place: Option<weather::Place>,
+    city_edit: Option<CityEdit>,
+    search_seq: u64,
     sampler: system::Sampler,
     stats: system::Stats,
     stats_interval: u32,
@@ -488,6 +518,9 @@ impl Notch {
                 big_format: formats.big,
                 big_icon_format: formats.big_icon,
                 weather: None,
+                place: weather::saved_place(),
+                city_edit: None,
+                search_seq: 0,
                 sampler: system::Sampler::new(),
                 stats: system::Stats::default(),
                 stats_interval: 0,
@@ -792,8 +825,14 @@ impl Notch {
             STATUS_TAB => return PAD * 0.7 + 64.0 + 10.0 + 52.0 * 2.0 + 10.0 + PAD * 0.8,
             CALENDAR_TAB => return PAD * 0.7 + 28.0 + 6.0 + 18.0 + 6.0 * 28.0 + PAD * 0.6,
             SETTINGS_TAB => {
-                let rows = Choice::ALL.len() as f32;
-                return PAD * 0.7 + rows * (CHOICE_HEIGHT + 10.0) + SLIDER_HEIGHT + 16.0 + 30.0 + PAD * 0.8;
+                let rows = Choice::ALL.len() as f32 + 1.0;
+                return PAD * 0.7
+                    + rows * (CHOICE_HEIGHT + 10.0)
+                    + self.city_list_height()
+                    + SLIDER_HEIGHT
+                    + 16.0
+                    + 30.0
+                    + PAD * 0.8;
             }
             _ => {}
         }
@@ -881,6 +920,20 @@ impl Notch {
                 }
                 y += (CHOICE_HEIGHT + 10.0) * s;
             }
+            // The weather's place; "Otomatik" sits inside the field, so it goes first.
+            if self.city_edit.is_none() && self.place.is_some() {
+                let h = CHOICE_HEIGHT * s;
+                list.push((rect(right - 78.0 * s, y + 4.0 * s, right - 4.0 * s, y + h - 4.0 * s), Control::CityAuto));
+            }
+            list.push((rect(x0, y, right, y + CHOICE_HEIGHT * s), Control::CityField));
+            y += (CHOICE_HEIGHT + 6.0) * s;
+            if let Some(edit) = &self.city_edit {
+                for i in 0..edit.results.len() {
+                    let top = y + i as f32 * RESULT_HEIGHT * s;
+                    list.push((rect(x0, top, right, top + (RESULT_HEIGHT - 2.0) * s), Control::CityResult(i)));
+                }
+            }
+            y += (self.city_list_height() + 4.0) * s;
             let icon = rect(left, y, left + 18.0 * s, y + SLIDER_HEIGHT * s);
             list.push((icon, Control::SliderIcon(Slider::Opacity)));
             list.push((rect(x0, y, right - 40.0 * s, y + SLIDER_HEIGHT * s), Control::Slider(Slider::Opacity)));
@@ -1444,6 +1497,20 @@ impl Notch {
             self.text(choice.title(), &self.title_format, pt(x, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
             y += (CHOICE_HEIGHT + 10.0) * s;
         }
+        let cy = y + CHOICE_HEIGHT * s / 2.0;
+        self.icon(ICON_PLACE, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), white(0.8));
+        let (_, th) = self.text_size("Hava konumu", &self.title_format);
+        self.text("Hava konumu", &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
+        y += (CHOICE_HEIGHT + 6.0) * s;
+        if let Some(edit) = &self.city_edit {
+            if edit.results.is_empty() && !edit.text.trim().is_empty() {
+                let status = if edit.searching { "Aranıyor…" } else { "Bulunamadı" };
+                let (_, sh) = self.text_size(status, &self.small_format);
+                let x = left + LABEL_WIDTH * s + 12.0 * s;
+                self.text(status, &self.small_format, pt(x, y + (RESULT_HEIGHT * s - sh) / 2.0), white(0.5), 200.0 * s);
+            }
+        }
+        y += (self.city_list_height() + 4.0) * s;
         y += (SLIDER_HEIGHT + 16.0) * s;
         let note = "Ayarlar kendiliğinden kaydedilir";
         let (_, nh) = self.text_size(note, &self.small_format);
@@ -1753,6 +1820,76 @@ impl Notch {
                     let color = if selected { with_alpha(ON_ACCENT, alpha) } else { white(if hot { 0.95 } else { 0.7 }) };
                     self.text(label, &self.title_format, pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0), color, lw + 4.0);
                 }
+                Control::CityField => {
+                    let editing = self.city_edit.is_some();
+                    let hot = hovered == Some(Control::CityField);
+                    let radius = (r.bottom - r.top) / 2.0;
+                    self.fill_rounded(r, radius, white(if editing { 0.10 } else if hot { 0.09 } else { 0.06 }));
+                    if editing {
+                        let edge = rect(r.left + 0.75 * s, r.top + 0.75 * s, r.right - 0.75 * s, r.bottom - 0.75 * s);
+                        unsafe {
+                            self.brush.SetColor(&with_alpha(ACCENT, alpha));
+                            self.surface.rt.DrawRoundedRectangle(
+                                &D2D1_ROUNDED_RECT { rect: edge, radiusX: radius, radiusY: radius },
+                                &self.brush,
+                                1.5 * s,
+                                None,
+                            );
+                        }
+                    }
+                    let x = r.left + 12.0 * s;
+                    let cy = (r.top + r.bottom) / 2.0;
+                    match &self.city_edit {
+                        Some(edit) => {
+                            let (tw, th) = self.text_size(&edit.text, &self.title_format);
+                            if edit.text.is_empty() {
+                                let (_, ph) = self.text_size("Şehir ara…", &self.title_format);
+                                self.text("Şehir ara…", &self.title_format, pt(x + 3.0 * s, cy - ph / 2.0), white(0.4), r.right - x);
+                            } else {
+                                self.text(&edit.text, &self.title_format, pt(x, cy - th / 2.0), white(0.95), r.right - x - 8.0 * s);
+                            }
+                            let cx = (x + tw + 1.0 * s).min(r.right - 10.0 * s);
+                            self.fill_rounded(rect(cx, cy - 7.0 * s, cx + 1.5 * s, cy + 7.0 * s), 0.75 * s, with_alpha(ACCENT, alpha));
+                        }
+                        None => {
+                            let label = match (&self.place, &self.weather) {
+                                (Some(p), _) => p.name.clone(),
+                                (None, Some(w)) if !w.city.is_empty() => format!("{} (otomatik)", w.city),
+                                _ => "Otomatik".to_string(),
+                            };
+                            let limit = if self.place.is_some() { r.right - 84.0 * s - x } else { r.right - 12.0 * s - x };
+                            let (_, th) = self.text_size(&label, &self.title_format);
+                            self.text(&label, &self.title_format, pt(x, cy - th / 2.0), white(0.9), limit);
+                        }
+                    }
+                }
+                Control::CityAuto => {
+                    let hot = hovered == Some(Control::CityAuto);
+                    self.fill_rounded(r, (r.bottom - r.top) / 2.0, white(if hot { 0.18 } else { 0.09 }));
+                    let (lw, lh) = self.text_size("Otomatik", &self.small_format);
+                    self.text(
+                        "Otomatik",
+                        &self.small_format,
+                        pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0),
+                        white(if hot { 1.0 } else { 0.75 }),
+                        lw + 4.0,
+                    );
+                }
+                Control::CityResult(i) => {
+                    let Some(place) = self.city_edit.as_ref().and_then(|e| e.results.get(i)) else { continue };
+                    let hot = hovered == Some(Control::CityResult(i));
+                    if hot || i == 0 {
+                        self.fill_rounded(r, 8.0 * s, white(if hot { 0.10 } else { 0.05 }));
+                    }
+                    let x = r.left + 12.0 * s;
+                    let cy = (r.top + r.bottom) / 2.0;
+                    let (nw, nh) = self.text_size(&place.name, &self.title_format);
+                    let name_limit = (r.right - x) * 0.55;
+                    self.text(&place.name, &self.title_format, pt(x, cy - nh / 2.0), white(0.95), name_limit);
+                    let rx = x + nw.min(name_limit) + 8.0 * s;
+                    let (_, rh) = self.text_size(&place.region, &self.small_format);
+                    self.text(&place.region, &self.small_format, pt(rx, cy - rh / 2.0), white(0.5), r.right - 8.0 * s - rx);
+                }
                 Control::Quit => {
                     let hot = hovered == Some(Control::Quit);
                     let pressed = self.pressed == Some(Control::Quit);
@@ -1915,6 +2052,121 @@ impl Notch {
         self.render();
     }
 
+    // ---- the weather's place ---------------------------------------------------
+
+    /// Rows under the place field while typing (DIPs).
+    fn city_list_height(&self) -> f32 {
+        match &self.city_edit {
+            Some(edit) if !edit.results.is_empty() => edit.results.len() as f32 * RESULT_HEIGHT,
+            Some(edit) if !edit.text.trim().is_empty() => RESULT_HEIGHT,
+            _ => 0.0,
+        }
+    }
+
+    /// The notch takes the keyboard while a city is typed; it normally never
+    /// takes the focus.
+    fn start_city_edit(&mut self) {
+        if self.city_edit.is_some() || self.headless {
+            return;
+        }
+        let previous = unsafe { GetForegroundWindow() };
+        self.city_edit = Some(CityEdit { text: String::new(), results: Vec::new(), searching: false, previous });
+        unsafe {
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex & !(WS_EX_NOACTIVATE.0 as isize));
+            let _ = SetForegroundWindow(self.hwnd);
+            let _ = SetFocus(Some(self.hwnd));
+        }
+        self.sync_panel_height(true);
+    }
+
+    fn end_city_edit(&mut self, give_focus_back: bool) {
+        let Some(edit) = self.city_edit.take() else { return };
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_SEARCH);
+            let ex = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
+            if give_focus_back && !edit.previous.0.is_null() {
+                let _ = SetForegroundWindow(edit.previous);
+            }
+            if !self.hovered {
+                SetTimer(Some(self.hwnd), TIMER_COLLAPSE, 180, None);
+            }
+        }
+        self.sync_panel_height(true);
+        self.render();
+    }
+
+    fn on_char(&mut self, c: u32) {
+        let Some(edit) = &mut self.city_edit else { return };
+        match c {
+            0x08 => {
+                edit.text.pop();
+            }
+            0x0D => {
+                if let Some(place) = edit.results.first().cloned() {
+                    self.pick_place(place);
+                }
+                return;
+            }
+            0x1B => {
+                self.end_city_edit(true);
+                return;
+            }
+            c if c >= 0x20 => match char::from_u32(c) {
+                Some(ch) if edit.text.chars().count() < 40 => edit.text.push(ch),
+                _ => return,
+            },
+            _ => return,
+        }
+        edit.searching = !edit.text.trim().is_empty();
+        if !edit.searching {
+            edit.results.clear();
+        }
+        // Search once the typing pauses.
+        self.search_seq += 1;
+        unsafe { SetTimer(Some(self.hwnd), TIMER_SEARCH, 350, None) };
+        self.sync_panel_height(true);
+        self.render();
+    }
+
+    fn search_city(&mut self) {
+        let Some(edit) = &self.city_edit else { return };
+        let text = edit.text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.search_seq += 1;
+        let seq = self.search_seq;
+        std::thread::spawn(move || {
+            let found = weather::search(&text);
+            if let Ok(mut s) = SEARCH.lock() {
+                *s = Some((seq, found));
+            }
+            post(WM_PLACES);
+        });
+    }
+
+    fn on_places(&mut self) {
+        let Some((seq, found)) = SEARCH.lock().ok().and_then(|mut s| s.take()) else { return };
+        if seq != self.search_seq {
+            return;
+        }
+        if let Some(edit) = &mut self.city_edit {
+            edit.results = found;
+            edit.searching = false;
+        }
+        self.sync_panel_height(true);
+        self.render();
+    }
+
+    fn pick_place(&mut self, place: weather::Place) {
+        weather::set_place(Some(&place));
+        self.place = Some(place);
+        self.weather = None;
+        self.end_city_edit(true);
+    }
+
     fn on_down(&mut self, x: f32, y: f32) {
         let hit = self.hit(x, y);
         if let Some(Control::Slider(slider)) = &hit {
@@ -1953,6 +2205,7 @@ impl Notch {
         match control {
             Control::Tab(i) => {
                 if TABS[i].1 && self.tab != i {
+                    self.end_city_edit(false);
                     self.tab = i;
                     if i == STATUS_TAB {
                         self.stats = self.sampler.sample();
@@ -2005,6 +2258,17 @@ impl Notch {
                 }
             }
             Control::Quit => crate::dock::quit(),
+            Control::CityField => self.start_city_edit(),
+            Control::CityAuto => {
+                weather::set_place(None);
+                self.place = None;
+                self.weather = None;
+            }
+            Control::CityResult(i) => {
+                if let Some(place) = self.city_edit.as_ref().and_then(|e| e.results.get(i).cloned()) {
+                    self.pick_place(place);
+                }
+            }
             Control::Player(app) => {
                 self.player = Some(app);
                 self.refresh_app_volume();
@@ -2118,6 +2382,27 @@ impl Notch {
             notch.render();
             save(&notch, name);
         }
+        let place = |name: &str, region: &str| weather::Place {
+            name: name.into(),
+            region: region.into(),
+            latitude: 0.0,
+            longitude: 0.0,
+        };
+        notch.city_edit = Some(CityEdit {
+            text: "Ürg".into(),
+            results: vec![place("Ürgüp", "Nevşehir, Türkiye"), place("Ürgenç", "Harezm, Özbekistan")],
+            searching: false,
+            previous: HWND::default(),
+        });
+        notch.sync_panel_height(false);
+        notch.render();
+        save(&notch, "2f-settings-city");
+        notch.city_edit = None;
+        notch.place = Some(place("Ürgüp", "Nevşehir, Türkiye"));
+        notch.sync_panel_height(false);
+        notch.render();
+        save(&notch, "2g-settings-place");
+        notch.place = None;
         let playing = notch.media.clone();
         notch.apply_media(media::Snapshot::default());
         notch.music = Spring::new(0.0);
@@ -2328,9 +2613,13 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER => {
             let notch = &mut *ptr;
             match wparam.0 {
+                TIMER_SEARCH => {
+                    let _ = KillTimer(Some(hwnd), TIMER_SEARCH);
+                    notch.search_city();
+                }
                 TIMER_COLLAPSE => {
                     let _ = KillTimer(Some(hwnd), TIMER_COLLAPSE);
-                    if !notch.hovered && notch.dragging.is_none() {
+                    if !notch.hovered && notch.dragging.is_none() && notch.city_edit.is_none() {
                         notch.set_open(false);
                     }
                 }
@@ -2354,6 +2643,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 notch.displays = displays::snapshot();
                 notch.render();
             }
+            LRESULT(0)
+        }
+        WM_CHAR => {
+            (*ptr).on_char(wparam.0 as u32);
+            LRESULT(0)
+        }
+        WM_ACTIVATE => {
+            // Clicking elsewhere while typing a city ends the typing.
+            if wparam.0 & 0xFFFF == 0 {
+                (*ptr).end_city_edit(false);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_PLACES => {
+            (*ptr).on_places();
             LRESULT(0)
         }
         WM_SETTINGS_CHANGED => {
