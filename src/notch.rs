@@ -1780,9 +1780,10 @@ impl Notch {
         self.text(&title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
         y += (CHOICE_HEIGHT + 10.0) * s;
         y += (SLIDER_HEIGHT + 16.0) * s;
-        let note = "Ayarlar kendiliğinden kaydedilir";
+        let note = format!("Pollen {} · ayarlar kendiliğinden kaydedilir", crate::install::VERSION);
+        let note = note.as_str();
         let (_, nh) = self.text_size(note, &self.small_format);
-        self.text(note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), white(0.4), 220.0 * s);
+        self.text(note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), white(0.4), 245.0 * s);
     }
 
     fn draw_calendar(&self, island: D2D_RECT_F, alpha: f32) {

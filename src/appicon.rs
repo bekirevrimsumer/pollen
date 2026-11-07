@@ -32,7 +32,7 @@ pub fn add(owner: HWND, message: u32) {
     nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
     nid.uCallbackMessage = message;
     nid.hIcon = flower(unsafe { GetSystemMetrics(SM_CXSMICON) }.max(16));
-    let tip: Vec<u16> = "Pollen".encode_utf16().collect();
+    let tip: Vec<u16> = format!("Pollen {}", crate::install::VERSION).encode_utf16().collect();
     nid.szTip[..tip.len()].copy_from_slice(&tip);
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &nid);

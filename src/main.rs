@@ -7,6 +7,7 @@ mod apps;
 mod controls;
 mod dock;
 mod icons;
+mod install;
 mod notch;
 mod pacer;
 mod preview;
@@ -93,6 +94,11 @@ fn main() -> Result<()> {
         }
         if args.iter().any(|a| a == "--restore-taskbar") {
             taskbar::restore_after_crash();
+            return Ok(());
+        }
+
+        // Run from a download: install, update or uninstall first.
+        if install::handle(&args) {
             return Ok(());
         }
 

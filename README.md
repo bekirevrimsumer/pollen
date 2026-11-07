@@ -1,9 +1,26 @@
+<p align="center"><img src="assets/icon-256.png" width="96" alt=""></p>
+
 # Pollen
 
-A lightweight native dock for Windows that replaces the taskbar, written in Rust with
-Direct2D. No WebView, no GPU device, no background polling: about 16 MB in Task Manager.
+A lightweight native dock and notch for Windows that replace the taskbar, written in
+Rust with Direct2D. No WebView, no GPU device, no background polling: about 15 MB in
+Task Manager, one 1 MB program.
 
-> Working name. Early stage.
+> Early stage. Windows 10/11, x64. The interface is in Turkish.
+
+## Install
+
+1. Download `Pollen.exe` from the [latest release](../../releases/latest).
+2. Run it and choose **Kur** (install). Pollen installs for your user only, with no
+   admin rights: into `%LOCALAPPDATA%\Programs\Pollen`, with a Start menu shortcut.
+3. To remove it: Settings › Apps › Installed apps › Pollen › Uninstall.
+
+Running a newer `Pollen.exe` offers to update the installed one; your settings and
+pins stay. The program is not signed yet, so SmartScreen may warn the first time
+(More info › Run anyway).
+
+Command line: `Pollen.exe --install` installs or updates without asking,
+`--here` runs a copy without installing, `--uninstall` removes Pollen.
 
 ## What works
 

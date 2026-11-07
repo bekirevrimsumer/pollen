@@ -1,5 +1,8 @@
 //! Starting Pollen with Windows: a value under the user's `Run` key, set from
-//! the Settings tab or the tray icon's menu. Off unless the user turns it on.
+//! the Settings tab, the tray icon's menu or the installer. Off unless the
+//! user turns it on.
+
+use std::path::Path;
 
 use windows::core::w;
 use windows::Win32::System::Registry::{
@@ -10,17 +13,16 @@ use crate::util::{pcwstr, wide};
 
 const RUN: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 
-fn command() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    Some(format!("\"{}\"", exe.display()))
+fn command_for(exe: &Path) -> String {
+    format!("\"{}\"", exe.display())
 }
 
-/// Whether Windows starts this copy of Pollen at sign-in.
-pub fn is_enabled() -> bool {
+/// The command Windows runs at sign-in, if any.
+fn current_value() -> Option<String> {
     let run = wide(RUN);
     let mut buffer = [0u16; 1024];
     let mut size = (buffer.len() * 2) as u32;
-    let ok = unsafe {
+    unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             pcwstr(&run),
@@ -30,32 +32,53 @@ pub fn is_enabled() -> bool {
             Some(buffer.as_mut_ptr() as *mut _),
             Some(&mut size),
         )
-    }
-    .is_ok();
-    if !ok {
-        return false;
+        .ok()
+        .ok()?;
     }
     let len = buffer.iter().position(|&c| c == 0).unwrap_or(buffer.len());
-    let value = String::from_utf16_lossy(&buffer[..len]);
-    command().is_some_and(|c| c.eq_ignore_ascii_case(&value))
+    Some(String::from_utf16_lossy(&buffer[..len]))
 }
 
+/// Whether Windows starts this copy of Pollen at sign-in.
+pub fn is_enabled() -> bool {
+    match (current_value(), std::env::current_exe()) {
+        (Some(value), Ok(exe)) => value.eq_ignore_ascii_case(&command_for(&exe)),
+        _ => false,
+    }
+}
+
+/// Whether Windows starts some copy of Pollen (an update keeps the choice).
+pub fn is_enabled_anywhere() -> bool {
+    current_value().is_some()
+}
+
+/// Turns it on for this copy, or off.
 pub fn set(enabled: bool) {
+    match (enabled, std::env::current_exe()) {
+        (true, Ok(exe)) => enable_for(&exe),
+        (true, Err(_)) => {}
+        (false, _) => disable(),
+    }
+}
+
+pub fn enable_for(exe: &Path) {
+    let run = wide(RUN);
+    let value = wide(&command_for(exe));
+    unsafe {
+        let _ = RegSetKeyValueW(
+            HKEY_CURRENT_USER,
+            pcwstr(&run),
+            w!("Pollen"),
+            REG_SZ.0,
+            Some(value.as_ptr() as *const _),
+            (value.len() * 2) as u32,
+        );
+    }
+}
+
+pub fn disable() {
     let run = wide(RUN);
     unsafe {
-        if enabled {
-            let Some(command) = command() else { return };
-            let value = wide(&command);
-            let _ = RegSetKeyValueW(
-                HKEY_CURRENT_USER,
-                pcwstr(&run),
-                w!("Pollen"),
-                REG_SZ.0,
-                Some(value.as_ptr() as *const _),
-                (value.len() * 2) as u32,
-            );
-        } else {
-            let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, pcwstr(&run), w!("Pollen"));
-        }
+        let _ = RegDeleteKeyValueW(HKEY_CURRENT_USER, pcwstr(&run), w!("Pollen"));
     }
 }

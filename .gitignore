@@ -1,3 +1,4 @@
 /target
 # Screenshots dropped in the project root while testing
 /*.png
+/assets/icon-preview.png
