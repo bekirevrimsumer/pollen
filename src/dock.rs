@@ -24,6 +24,7 @@
 //! notifications, on window moves (debounced) and, while anything is still moving,
 //! once per display refresh (see `pacer`) until everything settles.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -49,7 +50,10 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_TEXT_METRICS,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
+use windows::Win32::Graphics::Gdi::{
+    EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
@@ -141,6 +145,14 @@ const WM_PRESS_TRAY: u32 = WM_APP + 9;
 const WM_SETTINGS_CHANGED: u32 = WM_APP + 10;
 /// The mouse left the window previews.
 const WM_PREVIEW_LEFT: u32 = WM_APP + 11;
+// The main dock passes what it hears from Windows on to the other monitors'
+// docks with these.
+const WM_SYNC_REFRESH: u32 = WM_APP + 12;
+/// lparam: the newly active window.
+const WM_SYNC_FOREGROUND: u32 = WM_APP + 13;
+const WM_SYNC_MOVED: u32 = WM_APP + 14;
+const WM_SYNC_POLL: u32 = WM_APP + 15;
+const WM_SYNC_PINS: u32 = WM_APP + 16;
 const ABN_POSCHANGED: usize = 1;
 const ABN_FULLSCREENAPP: usize = 2;
 
@@ -154,8 +166,97 @@ const HSHELL_REDRAW: usize = 6;
 const HSHELL_WINDOWREPLACED: usize = 13;
 const HSHELL_RUDEAPPACTIVATED: usize = 0x8004;
 
-/// The dock window, for the WinEvent callback (which gets no context pointer).
+/// The main (primary monitor's) dock window, for the WinEvent callback (which
+/// gets no context pointer) and for the notch and the previews.
 static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
+
+thread_local! {
+    /// The other monitors' docks. The main dock creates and removes them as
+    /// monitors come and go.
+    static OTHERS: RefCell<Vec<Box<Dock>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// A monitor: its GDI device name (`\\.\DISPLAY2`), handle and whether it is the primary.
+struct Screen {
+    device: String,
+    handle: HMONITOR,
+    primary: bool,
+}
+
+fn screens() -> Vec<Screen> {
+    unsafe extern "system" fn collect(monitor: HMONITOR, _: HDC, _: *mut RECT, data: LPARAM) -> windows::core::BOOL {
+        let list = &mut *(data.0 as *mut Vec<Screen>);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(monitor, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO).as_bool() {
+            let len = info.szDevice.iter().position(|&c| c == 0).unwrap_or(info.szDevice.len());
+            list.push(Screen {
+                device: String::from_utf16_lossy(&info.szDevice[..len]),
+                handle: monitor,
+                primary: info.monitorInfo.dwFlags & 1 != 0,
+            });
+        }
+        true.into()
+    }
+    let mut list: Vec<Screen> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(collect), LPARAM(&mut list as *mut Vec<Screen> as isize));
+    }
+    list
+}
+
+fn device_of(monitor: HMONITOR) -> Option<String> {
+    screens().into_iter().find(|s| s.handle == monitor).map(|s| s.device)
+}
+
+/// Gives every monitor but the primary its own dock, and drops the docks of
+/// monitors that are gone.
+fn sync_screens() {
+    let wanted: Vec<String> = screens().into_iter().filter(|s| !s.primary).map(|s| s.device).collect();
+    let gone: Vec<Box<Dock>> = OTHERS.with(|o| {
+        let mut o = o.borrow_mut();
+        let (keep, gone): (Vec<_>, Vec<_>) = o.drain(..).partition(|d| d.screen.as_ref().is_some_and(|s| wanted.contains(s)));
+        *o = keep;
+        gone
+    });
+    for dock in gone {
+        unsafe {
+            let _ = DestroyWindow(dock.hwnd);
+        }
+    }
+    for device in wanted {
+        let exists = OTHERS.with(|o| o.borrow().iter().any(|d| d.screen.as_deref() == Some(device.as_str())));
+        if !exists {
+            if let Ok(dock) = Dock::build(false, Some(device)) {
+                OTHERS.with(|o| o.borrow_mut().push(dock));
+            }
+        }
+    }
+}
+
+/// Posts a message to the other monitors' docks.
+fn broadcast(message: u32, lparam: LPARAM) {
+    let hwnds: Vec<HWND> = OTHERS.with(|o| o.borrow().iter().map(|d| d.hwnd).collect());
+    for hwnd in hwnds {
+        unsafe {
+            let _ = PostMessageW(Some(hwnd), message, WPARAM(0), lparam);
+        }
+    }
+}
+
+/// Posts a message to every dock but `except`.
+fn post_all(message: u32, except: Option<HWND>) {
+    let main = HWND(DOCK_HWND.load(Ordering::Relaxed) as *mut _);
+    let mut hwnds: Vec<HWND> = OTHERS.with(|o| o.borrow().iter().map(|d| d.hwnd).collect());
+    hwnds.push(main);
+    for hwnd in hwnds {
+        if !hwnd.0.is_null() && Some(hwnd) != except {
+            unsafe {
+                let _ = PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
 
 /// Quits Pollen (the notch's Settings tab): closing the dock restores the
 /// taskbar and ends the message loop.
@@ -171,22 +272,12 @@ pub fn quit() {
 /// The window previews tell the dock the mouse left them, so it can hide
 /// (Smart and Peek) as if the mouse had left the dock.
 pub fn preview_left() {
-    let hwnd = DOCK_HWND.load(Ordering::Relaxed);
-    if hwnd != 0 {
-        unsafe {
-            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_PREVIEW_LEFT, WPARAM(0), LPARAM(0));
-        }
-    }
+    post_all(WM_PREVIEW_LEFT, None);
 }
 
-/// Tells the dock to pick up changed settings.
+/// Tells the docks to pick up changed settings.
 pub fn settings_changed() {
-    let hwnd = DOCK_HWND.load(Ordering::Relaxed);
-    if hwnd != 0 {
-        unsafe {
-            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
-        }
-    }
+    post_all(WM_SETTINGS_CHANGED, None);
 }
 
 const fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
@@ -421,14 +512,25 @@ pub struct Dock {
     /// and paints an opaque backdrop so the PNGs are readable.
     headless: bool,
     _event_hooks: Vec<HWINEVENTHOOK>,
+    /// The monitor's device name for another monitor's dock; None for the
+    /// main dock on the primary monitor, which also does the global work.
+    screen: Option<String>,
 }
 
 impl Dock {
+    /// The main dock, then one for each other monitor.
     pub fn create() -> Result<Box<Dock>> {
-        Self::build(false)
+        let dock = Self::build(false, None)?;
+        sync_screens();
+        Ok(dock)
     }
 
-    fn build(headless: bool) -> Result<Box<Dock>> {
+    fn is_main(&self) -> bool {
+        self.screen.is_none()
+    }
+
+    fn build(headless: bool, screen: Option<String>) -> Result<Box<Dock>> {
+        let main = screen.is_none();
         unsafe {
             let instance = GetModuleHandleW(None)?;
             let class = WNDCLASSEXW {
@@ -455,7 +557,7 @@ impl Dock {
                 Some(instance.into()),
                 None,
             )?;
-            if !headless {
+            if !headless && main {
                 DOCK_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
             }
 
@@ -514,10 +616,11 @@ impl Dock {
                 drag: None,
                 headless,
                 _event_hooks: Vec::new(),
+                screen,
             });
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, dock.as_mut() as *mut Dock as isize);
 
-            if !headless {
+            if !headless && main {
                 taskbar::hide();
                 taskbar::watch();
             }
@@ -539,6 +642,12 @@ impl Dock {
                 dock.drop = Spring::new(dock.hidden_offset());
             }
             dock.render();
+            if !main {
+                if !dock.hidden_for_fullscreen {
+                    let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                }
+                return Ok(dock);
+            }
 
             let _ = RegisterShellHookWindow(hwnd);
             // Window moves, maximize/restore and minimize decide whether the bar
@@ -678,10 +787,17 @@ impl Dock {
         self.render();
     }
 
-    /// Bottom of the primary monitor, full width.
+    /// Bottom of its monitor, full width.
     fn place(&mut self) {
         unsafe {
-            let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+            let monitor = match &self.screen {
+                None => MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY),
+                Some(device) => match screens().into_iter().find(|s| &s.device == device) {
+                    Some(s) => s.handle,
+                    // Gone; the main dock removes this one.
+                    None => return,
+                },
+            };
             let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
             let _ = GetMonitorInfoW(monitor, &mut info);
             let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
@@ -736,7 +852,9 @@ impl Dock {
                 let _ = ShowWindow(self.hwnd, if hide { SW_HIDE } else { SW_SHOWNOACTIVATE });
             }
         }
-        crate::notch::set_hidden_for_fullscreen(hide);
+        if self.is_main() {
+            crate::notch::set_hidden_for_fullscreen(hide);
+        }
     }
 
     /// Fixed: widen while a window reaches the strip. Smart: hide while a window
@@ -1757,6 +1875,7 @@ impl Dock {
             if self.items[i].pinned {
                 let order: Vec<String> = self.items.iter().filter(|it| it.pinned && it.kind == Kind::App).map(|it| it.key.clone()).collect();
                 settings::save_pin_order(&order);
+                post_all(WM_SYNC_PINS, Some(self.hwnd));
             }
         }
         self.pressed = None;
@@ -1852,7 +1971,10 @@ impl Dock {
     }
 
     fn on_poll(&mut self) {
-        taskbar::keep_hidden();
+        if self.is_main() {
+            taskbar::keep_hidden();
+            broadcast(WM_SYNC_POLL, LPARAM(0));
+        }
         if apps::pins_signature() != self.pins_signature {
             self.reload_pins();
         }
@@ -1862,7 +1984,9 @@ impl Dock {
 
     fn shutdown(&mut self) {
         self.remove_appbar();
-        taskbar::restore();
+        if self.is_main() {
+            taskbar::restore();
+        }
     }
 }
 
@@ -1870,7 +1994,7 @@ impl Dock {
     /// `pollen --snapshot <dir>`: renders key moments of the dock's motion to PNG
     /// files without showing anything on screen.
     pub fn snapshot(dir: &str) -> Result<()> {
-        let mut dock = Self::build(true)?;
+        let mut dock = Self::build(true, None)?;
         let save = |dock: &Dock, name: &str| {
             let path = format!("{dir}\\{name}.png");
             match dock.surface.save_png(&path) {
@@ -2181,9 +2305,7 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
         (CMD_MODE_FIXED, _) => dock.set_mode(DockMode::Fixed),
         (CMD_MODE_SMART, _) => dock.set_mode(DockMode::Smart),
         (CMD_MODE_PEEK, _) => dock.set_mode(DockMode::Peek),
-        (CMD_QUIT, _) => {
-            let _ = DestroyWindow(hwnd);
-        }
+        (CMD_QUIT, _) => quit(),
         _ => {}
     }
 }
@@ -2204,7 +2326,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 rc: RECT,
             }
             let info = &mut *(lparam.0 as *mut ShellHookInfo);
-            if let Some(rect) = dock.minimize_target(info.hwnd) {
+            // The dock on the window's monitor.
+            let device = device_of(MonitorFromWindow(info.hwnd, MONITOR_DEFAULTTONEAREST));
+            let other = OTHERS.with(|o| {
+                o.borrow()
+                    .iter()
+                    .find(|d| d.screen.is_some() && d.screen == device)
+                    .map(|d| d.minimize_target(info.hwnd))
+            });
+            let target = match other {
+                Some(target) => target,
+                None => dock.minimize_target(info.hwnd),
+            };
+            if let Some(rect) = target {
                 info.rc = rect;
                 return LRESULT(1);
             }
@@ -2212,12 +2346,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         match wparam.0 & 0xFFFF {
             HSHELL_WINDOWACTIVATED | HSHELL_RUDEAPPACTIVATED => {
+                broadcast(WM_SYNC_FOREGROUND, lparam);
                 dock.foreground = HWND(lparam.0 as *mut _);
                 dock.update_fullscreen();
                 dock.render();
                 dock.schedule_refresh();
             }
             HSHELL_WINDOWCREATED | HSHELL_WINDOWDESTROYED | HSHELL_WINDOWREPLACED | HSHELL_REDRAW => {
+                broadcast(WM_SYNC_REFRESH, LPARAM(0));
                 dock.schedule_refresh();
             }
             _ => {}
@@ -2228,8 +2364,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     if msg == (*ptr).taskbar_created_message && msg != 0 {
         // Explorer restarted: its taskbar is back and our reservation is gone.
         let dock = &mut *ptr;
-        taskbar::hide();
-        taskbar::watch();
+        if dock.is_main() {
+            taskbar::hide();
+            taskbar::watch();
+        }
         dock.appbar_registered = false;
         dock.apply_mode();
         dock.reload_pins();
@@ -2291,6 +2429,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 }
                 TIMER_WINDOWS_MOVED => {
                     let _ = KillTimer(Some(hwnd), TIMER_WINDOWS_MOVED);
+                    if dock.is_main() {
+                        broadcast(WM_SYNC_MOVED, LPARAM(0));
+                    }
                     dock.update_fullscreen();
                     dock.update_window_state();
                 }
@@ -2323,6 +2464,35 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             (*ptr).activate(Hit::Tray);
             LRESULT(0)
         }
+        WM_SYNC_REFRESH => {
+            (*ptr).schedule_refresh();
+            LRESULT(0)
+        }
+        WM_SYNC_FOREGROUND => {
+            let dock = &mut *ptr;
+            dock.foreground = HWND(lparam.0 as *mut _);
+            dock.update_fullscreen();
+            dock.render();
+            dock.schedule_refresh();
+            LRESULT(0)
+        }
+        WM_SYNC_MOVED => {
+            let dock = &mut *ptr;
+            dock.update_fullscreen();
+            dock.update_window_state();
+            LRESULT(0)
+        }
+        WM_SYNC_POLL => {
+            (*ptr).on_poll();
+            LRESULT(0)
+        }
+        WM_SYNC_PINS => {
+            let dock = &mut *ptr;
+            dock.reload_pins();
+            dock.refresh_windows();
+            dock.update_targets();
+            LRESULT(0)
+        }
         WM_PREVIEW_LEFT => {
             let dock = &mut *ptr;
             if dock.mouse.is_none() && dock.settings.dock_mode != DockMode::Fixed {
@@ -2349,17 +2519,27 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DISPLAYCHANGE | WM_SETTINGCHANGE | WM_DPICHANGED => {
             let dock = &mut *ptr;
-            if msg == WM_DISPLAYCHANGE {
+            let main = dock.is_main();
+            if msg == WM_DISPLAYCHANGE && main {
                 taskbar::keep_hidden();
             }
             dock.place();
             dock.update_window_state();
             dock.render();
+            if msg == WM_DISPLAYCHANGE && main {
+                // A monitor may have come or gone.
+                sync_screens();
+            }
             if msg == WM_DPICHANGED {
                 LRESULT(0)
             } else {
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_CLOSE if !(*ptr).is_main() => {
+            // Closing any dock quits Pollen, like closing the main one.
+            quit();
+            LRESULT(0)
         }
         WM_ENDSESSION => {
             if wparam.0 != 0 {
@@ -2369,9 +2549,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             (*ptr).shutdown();
-            DOCK_HWND.store(0, Ordering::Relaxed);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-            PostQuitMessage(0);
+            if (*ptr).is_main() {
+                // Quitting: the other monitors' docks go too.
+                let others: Vec<Box<Dock>> = OTHERS.with(|o| o.borrow_mut().drain(..).collect());
+                for other in others {
+                    let _ = DestroyWindow(other.hwnd);
+                }
+                DOCK_HWND.store(0, Ordering::Relaxed);
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),

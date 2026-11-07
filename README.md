@@ -3,11 +3,12 @@
 A lightweight native dock for Windows that replaces the taskbar, written in Rust with
 Direct2D. No WebView, no GPU device, no background polling: about 16 MB in Task Manager.
 
-> Working name. Early stage: dock only, primary monitor only.
+> Working name. Early stage.
 
 ## What works
 
-- Replaces the Windows taskbar
+- Replaces the Windows taskbar, with a dock on every monitor (the same apps on each;
+  monitors that come and go get or lose theirs)
 - Looks like Nectar's dock: Nectar's "Midnight" color, attached to the bottom edge,
   rounded on top with small inward flares, macOS-style magnification
 - Animations run in step with the display's refresh rate (144 fps on a 144 Hz screen)
@@ -78,7 +79,7 @@ pollen.exe --restore-taskbar
 
 ## Not yet
 
-- Monitors other than the primary
+- Per-monitor choices (each dock shows the same apps and uses the same mode)
 
 ## Build
 
