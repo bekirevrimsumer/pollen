@@ -56,7 +56,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::Spring;
-use crate::controls::{audio, displays, media, network, privacy, system, weather};
+use crate::controls::{audio, battery, displays, media, network, notifications, privacy, system, weather};
 use crate::pacer;
 use crate::render::Surface;
 use crate::settings::{self, DockMode, DockSize, Magnify, Settings};
@@ -82,7 +82,7 @@ const SLIDER_HEIGHT: f32 = 22.0;
 const LABEL_WIDTH: f32 = 112.0;
 /// Room in the window for the widest the island can get.
 const WINDOW_WIDTH: f32 = OPEN_WIDTH + FLARE * 2.0 + 24.0;
-const WINDOW_HEIGHT: f32 = 420.0;
+const WINDOW_HEIGHT: f32 = 540.0;
 
 /// Nectar's Midnight surface; it gets more opaque open (Nectar: +0.12).
 
@@ -100,6 +100,12 @@ const TIMER_STATS: usize = 5;
 const TIMER_SEARCH: usize = 6;
 /// How long the volume indicator stays up after the last change.
 const TIMER_OSD: usize = 7;
+/// The banner (time's up, a notification) goes after this.
+const TIMER_BANNER: usize = 8;
+/// While the timer, stopwatch or pomodoro runs.
+const TIMER_CLOCKWORK: usize = 9;
+/// The closed island's width while it shows a banner (DIPs).
+const BANNER_WIDTH: f32 = 360.0;
 const OSD_MS: u32 = 1500;
 /// The closed island's width while it shows the volume (DIPs).
 const OSD_WIDTH: f32 = 240.0;
@@ -124,6 +130,10 @@ const WM_VOLUME: u32 = WM_APP + 11;
 const WM_AUDIO_DEVICE: u32 = WM_APP + 12;
 /// Open on the Settings tab (the tray icon).
 const WM_SHOW_SETTINGS: u32 = WM_APP + 13;
+/// New Windows notifications are waiting in `notifications::take()`.
+const WM_NOTIFICATIONS: u32 = WM_APP + 14;
+/// The devices reporting a battery level changed (`battery::current()`).
+const WM_BATTERIES: u32 = WM_APP + 15;
 /// iOS's colors: orange for the microphone, green for the camera.
 const MIC_COLOR: D2D1_COLOR_F = rgba(1.0, 0.62, 0.04, 1.0);
 const CAMERA_COLOR: D2D1_COLOR_F = rgba(0.19, 0.82, 0.35, 1.0);
@@ -146,6 +156,7 @@ const ICON_VOLUME: char = '\u{E767}';
 const ICON_MUTE: char = '\u{E74F}';
 const ICON_BRIGHTNESS: char = '\u{E706}';
 const ICON_BELL: char = '\u{EA8F}';
+const ICON_HEADPHONES: char = '\u{E7F6}';
 const ICON_GEAR: char = '\u{E713}';
 const ICON_DISPLAY: char = '\u{E7F4}';
 const ICON_PREVIOUS: char = '\u{E892}';
@@ -170,6 +181,10 @@ const ICON_POWER: char = '\u{E7E8}';
 const ICON_PLACE: char = '\u{E81D}';
 const ICON_THEME: char = '\u{E771}';
 const ICON_LANGUAGE: char = '\u{E774}';
+const ICON_STOPWATCH: char = '\u{E916}';
+/// The closed island marks a running timer with this (the date's font has it).
+const ICON_STOPWATCH_TEXT: char = '⏱';
+const ICON_ALARM: char = '\u{EA8F}';
 const ICON_UPDATE: char = '\u{E895}';
 const ICON_CLOCK: char = '\u{E823}';
 const ICON_INFO: char = '\u{E946}';
@@ -241,6 +256,8 @@ enum Tile {
     Bluetooth,
     Network,
     Output,
+    /// A device reporting its battery (Bluetooth headphones), by index.
+    Battery(usize),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -296,11 +313,19 @@ enum Choice {
     Autostart,
     Language,
     Updates,
+    Notifications,
 }
 
 impl Choice {
-    const ALL: [Choice; 6] =
-        [Choice::Mode, Choice::Size, Choice::Magnify, Choice::Autostart, Choice::Updates, Choice::Language];
+    const ALL: [Choice; 7] = [
+        Choice::Mode,
+        Choice::Size,
+        Choice::Magnify,
+        Choice::Autostart,
+        Choice::Notifications,
+        Choice::Updates,
+        Choice::Language,
+    ];
 
     fn icon(self) -> char {
         match self {
@@ -310,6 +335,7 @@ impl Choice {
             Choice::Autostart => ICON_POWER,
             Choice::Language => ICON_LANGUAGE,
             Choice::Updates => ICON_UPDATE,
+            Choice::Notifications => ICON_BELL,
         }
     }
 
@@ -321,6 +347,7 @@ impl Choice {
             Choice::Autostart => t("Windows ile aç", "Autostart"),
             Choice::Language => t("Dil", "Language"),
             Choice::Updates => t("Güncellemeler", "Updates"),
+            Choice::Notifications => t("Bildirimler", "Notifications"),
         }
     }
 
@@ -332,6 +359,7 @@ impl Choice {
             Choice::Autostart => vec![t("Kapalı", "Off"), t("Açık", "On")],
             Choice::Language => settings::Language::ALL.map(|l| l.label()).to_vec(),
             Choice::Updates => vec![t("Kapalı", "Off"), t("Denetle", "Check")],
+            Choice::Notifications => vec![t("Kapalı", "Off"), t("Notch'ta göster", "Show on the notch")],
         }
     }
 
@@ -344,6 +372,7 @@ impl Choice {
             Choice::Autostart => Some(autostart as usize),
             Choice::Language => settings::Language::ALL.iter().position(|l| *l == s.language),
             Choice::Updates => Some(s.check_updates as usize),
+            Choice::Notifications => Some(s.notifications as usize),
         }
         .unwrap_or(0)
     }
@@ -356,6 +385,7 @@ impl Choice {
             Choice::Autostart => {}
             Choice::Language => s.language = settings::Language::ALL[i],
             Choice::Updates => s.check_updates = i == 1,
+            Choice::Notifications => s.notifications = i == 1,
         }
     }
 }
@@ -396,7 +426,118 @@ enum Control {
     CityAuto,
     /// Install the newer version (Settings footer).
     Update,
+    /// Timer tab: the mode (timer, stopwatch, pomodoro), a length in
+    /// minutes, start or pause, reset.
+    ClockMode(usize),
+    ClockPreset(u32),
+    ClockStart,
+    ClockReset,
     CityResult(usize),
+}
+
+/// A message shown on the closed island for a moment.
+struct Banner {
+    glyph: char,
+    title: String,
+    body: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Default)]
+enum ClockMode {
+    #[default]
+    Timer,
+    Stopwatch,
+    Pomodoro,
+}
+
+impl ClockMode {
+    const ALL: [ClockMode; 3] = [ClockMode::Timer, ClockMode::Stopwatch, ClockMode::Pomodoro];
+
+    fn label(self) -> &'static str {
+        match self {
+            ClockMode::Timer => t("Zamanlayıcı", "Timer"),
+            ClockMode::Stopwatch => t("Kronometre", "Stopwatch"),
+            ClockMode::Pomodoro => "Pomodoro",
+        }
+    }
+}
+
+/// The Timer tab's timer, stopwatch and pomodoro.
+struct Clockwork {
+    mode: ClockMode,
+    /// Running since, and what ran before the last pause.
+    since: Option<Instant>,
+    banked: Duration,
+    /// The timer's length.
+    length: Duration,
+    /// Pomodoro: focusing (else a break), and which of four rounds.
+    focus: bool,
+    round: u32,
+}
+
+impl Default for Clockwork {
+    fn default() -> Self {
+        Clockwork {
+            mode: ClockMode::Timer,
+            since: None,
+            banked: Duration::ZERO,
+            length: Duration::from_secs(5 * 60),
+            focus: true,
+            round: 1,
+        }
+    }
+}
+
+impl Clockwork {
+    fn running(&self) -> bool {
+        self.since.is_some()
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.banked + self.since.map(|at| at.elapsed()).unwrap_or_default()
+    }
+
+    /// Started at all (running or paused part way).
+    fn active(&self) -> bool {
+        self.running() || self.banked > Duration::ZERO
+    }
+
+    /// How long the current stretch lasts; None for the stopwatch.
+    fn target(&self) -> Option<Duration> {
+        match self.mode {
+            ClockMode::Timer => Some(self.length),
+            ClockMode::Stopwatch => None,
+            ClockMode::Pomodoro if self.focus => Some(Duration::from_secs(25 * 60)),
+            // Every fourth break is a long one.
+            ClockMode::Pomodoro if self.round % 4 == 0 => Some(Duration::from_secs(15 * 60)),
+            ClockMode::Pomodoro => Some(Duration::from_secs(5 * 60)),
+        }
+    }
+
+    /// "04:32" left (or, for the stopwatch, gone by); "1:02:03" past an hour.
+    fn text(&self) -> String {
+        let shown = match self.target() {
+            // Rounded up, so a timer shows 5:00 when it starts and 0:01 last.
+            Some(target) => {
+                let left = target.saturating_sub(self.elapsed());
+                Duration::from_secs((left.as_millis() as u64).div_ceil(1000))
+            }
+            None => Duration::from_secs(self.elapsed().as_secs()),
+        };
+        let secs = shown.as_secs();
+        if secs >= 3600 {
+            format!("{}:{:02}:{:02}", secs / 3600, secs / 60 % 60, secs % 60)
+        } else {
+            format!("{:02}:{:02}", secs / 60, secs % 60)
+        }
+    }
+
+    fn reset(&mut self) {
+        self.since = None;
+        self.banked = Duration::ZERO;
+        self.focus = true;
+        self.round = 1;
+    }
 }
 
 /// Typing a city in the Settings tab.
@@ -409,20 +550,24 @@ struct CityEdit {
 }
 
 /// Tabs: (icon, available yet).
-const TABS: [(char, bool); 6] = [
+const TABS: [(char, bool); 7] = [
     (ICON_MUSIC, true),
     (ICON_CONTROLS, true),
     (ICON_STATUS, true),
     (ICON_CLOUD, true),
     (ICON_CALENDAR, true),
+    (ICON_STOPWATCH, true),
     (ICON_GEAR, true),
 ];
+/// A tab button's width (DIPs); seven fit between the time and the date.
+const TAB_WIDTH: f32 = 38.0;
 const MUSIC_TAB: usize = 0;
 const CONTROL_CENTER_TAB: usize = 1;
 const STATUS_TAB: usize = 2;
 const WEATHER_TAB: usize = 3;
 const CALENDAR_TAB: usize = 4;
-const SETTINGS_TAB: usize = 5;
+const TIMER_TAB: usize = 5;
+const SETTINGS_TAB: usize = 6;
 /// A row of the Weather tab's coming days.
 const DAY_ROW: f32 = 26.0;
 /// A Settings row's height.
@@ -486,6 +631,14 @@ pub struct Notch {
     level_running: bool,
     /// 0..1: how much room the closed island gives to the playing track.
     music: Spring,
+    /// Devices with a battery level, for the Control Center.
+    batteries: Vec<battery::Device>,
+    /// A message on the closed island for a few seconds, and its room (0..1).
+    banner: Option<Banner>,
+    banner_room: Spring,
+    clockwork: Clockwork,
+    /// What the closed island showed for it last, to redraw only on change.
+    clockwork_text: String,
     /// The volume indicator's share of the closed island (0..1).
     osd_room: Spring,
     volume_watch: Option<audio::Watch>,
@@ -496,6 +649,7 @@ pub struct Notch {
     play_format: IDWriteTextFormat,
     big_format: IDWriteTextFormat,
     big_icon_format: IDWriteTextFormat,
+    clock_format: IDWriteTextFormat,
     symbol_format: IDWriteTextFormat,
     big_symbol_format: IDWriteTextFormat,
     weather: Option<weather::Weather>,
@@ -605,6 +759,11 @@ impl Notch {
                 bars: [0.0; 4],
                 level_running: false,
                 music: Spring::new(0.0),
+                batteries: Vec::new(),
+                banner: None,
+                banner_room: Spring::new(0.0),
+                clockwork: Clockwork::default(),
+                clockwork_text: String::new(),
                 osd_room: Spring::new(0.0),
                 volume_watch: None,
                 privacy: privacy::InUse::default(),
@@ -613,6 +772,7 @@ impl Notch {
                 play_format: formats.play,
                 big_format: formats.big,
                 big_icon_format: formats.big_icon,
+                clock_format: formats.clock,
                 symbol_format: formats.symbol,
                 big_symbol_format: formats.big_symbol,
                 weather: None,
@@ -638,6 +798,7 @@ impl Notch {
             media::start(hwnd, WM_MEDIA);
             weather::start(hwnd, WM_WEATHER);
             privacy::start(hwnd, WM_PRIVACY);
+            notifications::start(hwnd, WM_NOTIFICATIONS);
             notch.volume_watch = audio::Watch::start(hwnd, WM_VOLUME, WM_AUDIO_DEVICE);
             notch.update_stats_timer();
             network::refresh_radios(|| post(WM_RADIOS));
@@ -676,6 +837,7 @@ impl Notch {
                     self.play_format = f.play;
                     self.big_format = f.big;
                     self.big_icon_format = f.big_icon;
+                    self.clock_format = f.clock;
                     self.symbol_format = f.symbol;
                     self.big_symbol_format = f.big_symbol;
                 }
@@ -951,6 +1113,7 @@ impl Notch {
         }
         tiles.push(Tile::Network);
         tiles.push(Tile::Output);
+        tiles.extend((0..self.batteries.len().min(4)).map(Tile::Battery));
         tiles
     }
 
@@ -981,6 +1144,7 @@ impl Notch {
                 };
             }
             CALENDAR_TAB => return PAD * 0.7 + 28.0 + 6.0 + 18.0 + 6.0 * 28.0 + PAD * 0.6,
+            TIMER_TAB => return PAD * 0.7 + CHOICE_HEIGHT + 14.0 + 56.0 + 22.0 + 12.0 + 28.0 + 16.0 + 34.0 + PAD * 0.8,
             SETTINGS_TAB => {
                 // The choices, the weather's place and the theme.
                 let rows = Choice::ALL.len() as f32 + 2.0;
@@ -1009,7 +1173,8 @@ impl Notch {
 
     fn closed_width(&self) -> f32 {
         let (tw, _) = self.text_size(&self.time, &self.time_format);
-        let (dw, _) = self.text_size(&self.date, &self.date_format);
+        let (date, _) = self.closed_date();
+        let (dw, _) = self.text_size(&date, &self.date_format);
         let s = self.scale;
         let m = self.music.value.clamp(0.0, 1.0);
         // Time centered; weather on the left and the date on the right, each
@@ -1017,11 +1182,106 @@ impl Notch {
         let status = tw + 2.0 * (dw.max(STATUS_SIDE * s) + 30.0 * s);
         let music = (tw + dw + 8.0 * s + 36.0 * s).max(CLOSED_MIN_WIDTH * s) + 64.0 * s;
         let normal = lerp(status, music, m) + 2.0 * self.privacy_inset();
-        lerp(normal, OSD_WIDTH * s, self.osd_room.value.clamp(0.0, 1.0))
+        let with_osd = lerp(normal, OSD_WIDTH * s, self.osd_room.value.clamp(0.0, 1.0));
+        lerp(with_osd, BANNER_WIDTH * s, self.banner_room.value.clamp(0.0, 1.0))
     }
 
     /// A volume change from outside Pollen: the closed island widens for a
     /// moment to show it (the open panel's slider just follows).
+    // ---- the timer and the banner ------------------------------------------------------
+
+    /// Ticks while something runs; the closed island shows what is left.
+    fn update_clockwork_timer(&mut self) {
+        unsafe {
+            if self.clockwork.running() && !self.headless {
+                SetTimer(Some(self.hwnd), TIMER_CLOCKWORK, 200, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_CLOCKWORK);
+            }
+        }
+        self.start_animation();
+        self.render();
+    }
+
+    fn on_clockwork(&mut self) {
+        let done = self.clockwork.target().is_some_and(|target| self.clockwork.elapsed() >= target);
+        if done {
+            let (title, body) = match self.clockwork.mode {
+                ClockMode::Pomodoro if self.clockwork.focus => {
+                    self.clockwork.focus = false;
+                    (t("Mola zamanı", "Time for a break"), t("Biraz dinlen", "Rest a little"))
+                }
+                ClockMode::Pomodoro => {
+                    self.clockwork.focus = true;
+                    self.clockwork.round = self.clockwork.round % 4 + 1;
+                    (t("Odaklanma zamanı", "Back to focus"), t("Yeni tur başladı", "A new round has started"))
+                }
+                _ => (t("Süre doldu", "Time's up"), ""),
+            };
+            if self.clockwork.mode == ClockMode::Pomodoro {
+                // The next stretch starts by itself.
+                self.clockwork.banked = Duration::ZERO;
+                self.clockwork.since = Some(Instant::now());
+            } else {
+                self.clockwork.reset();
+            }
+            play_alarm();
+            self.show_banner(ICON_ALARM, title.to_string(), body.to_string(), 8);
+            self.update_clockwork_timer();
+            return;
+        }
+        let text = self.clockwork.text();
+        if text != self.clockwork_text {
+            self.clockwork_text = text;
+            if !self.animating {
+                self.render();
+            }
+        }
+    }
+
+    /// The closed island's right side: the date, or what the timer has left.
+    fn closed_date(&self) -> (String, bool) {
+        if self.clockwork.active() {
+            (format!("{} {}", ICON_STOPWATCH_TEXT, self.clockwork.text()), true)
+        } else {
+            (self.date.clone(), false)
+        }
+    }
+
+    /// Widens the closed island for a few seconds with a message.
+    fn show_banner(&mut self, glyph: char, title: String, body: String, seconds: u32) {
+        if self.headless {
+            return;
+        }
+        self.banner = Some(Banner { glyph, title, body });
+        self.banner_room.target = 1.0;
+        unsafe { SetTimer(Some(self.hwnd), TIMER_BANNER, seconds * 1000, None) };
+        self.start_animation();
+    }
+
+    /// The banner: a glyph in a disc, the title and a line under it.
+    fn draw_banner(&self, island: D2D_RECT_F, alpha: f32) {
+        let Some(banner) = &self.banner else { return };
+        let s = self.scale;
+        let ink = |a: f32| ink_color(a * alpha);
+        let d = 30.0 * s;
+        let cy = (island.top + island.bottom) / 2.0;
+        let disc = rect(island.left + 14.0 * s, cy - d / 2.0, island.left + 14.0 * s + d, cy + d / 2.0);
+        self.fill_rounded(disc, d / 2.0, with_alpha(accent(), alpha));
+        self.icon(banner.glyph, &self.icon_format, disc, with_alpha(on_accent(), alpha));
+        let x = disc.right + 12.0 * s;
+        let limit = island.right - 18.0 * s - x;
+        let (_, th) = self.text_size(&banner.title, &self.title_format);
+        if banner.body.is_empty() {
+            self.text(&banner.title, &self.title_format, pt(x, cy - th / 2.0), ink(0.95), limit);
+        } else {
+            let (_, bh) = self.text_size(&banner.body, &self.small_format);
+            let top = cy - (th + bh + 2.0 * s) / 2.0;
+            self.text(&banner.title, &self.title_format, pt(x, top), ink(0.95), limit);
+            self.text(&banner.body, &self.small_format, pt(x, top + th + 2.0 * s), ink(0.6), limit);
+        }
+    }
+
     fn on_volume(&mut self, packed: usize) {
         let volume = (packed & 0xFFFF) as f32 / 1000.0;
         let muted = (packed >> 16) & 1 != 0;
@@ -1099,7 +1359,9 @@ impl Notch {
         let width = self.surface.width as f32;
         let o = self.open.value.clamp(0.0, 1.05);
         let w = lerp(self.closed_width(), OPEN_WIDTH * s, o);
-        let h = lerp(BAR * s, (BAR + self.panel_h.value) * s, o);
+        // A banner with a second line makes the closed island taller.
+        let banner = self.banner_room.value.clamp(0.0, 1.0) * if self.banner.as_ref().is_some_and(|b| !b.body.is_empty()) { 16.0 } else { 6.0 };
+        let h = lerp((BAR + banner) * s, (BAR + self.panel_h.value) * s, o);
         let e = self.spread.value.clamp(0.0, 1.05);
         let c = CIRCLE * s;
         let w = lerp(c, w, e);
@@ -1118,7 +1380,7 @@ impl Notch {
         let s = self.scale;
         let mut list = Vec::new();
         // Tabs in the top row.
-        let tab_w = 40.0 * s;
+        let tab_w = TAB_WIDTH * s;
         let tabs_left = (island.left + island.right) / 2.0 - tab_w * TABS.len() as f32 / 2.0;
         for i in 0..TABS.len() {
             let x = tabs_left + i as f32 * tab_w;
@@ -1126,6 +1388,30 @@ impl Notch {
         }
         if self.tab == MUSIC_TAB {
             self.music_controls(island, &mut list);
+            return list;
+        }
+        if self.tab == TIMER_TAB {
+            let left = island.left + PAD * s;
+            let right = island.right - PAD * s;
+            let mut y = island.top + BAR * s + PAD * 0.7 * s;
+            let w = (right - left) / ClockMode::ALL.len() as f32;
+            for i in 0..ClockMode::ALL.len() {
+                let x = left + i as f32 * w;
+                list.push((rect(x, y, x + w, y + CHOICE_HEIGHT * s), Control::ClockMode(i)));
+            }
+            y += (CHOICE_HEIGHT + 14.0 + 56.0 + 22.0 + 12.0) * s;
+            if self.clockwork.mode == ClockMode::Timer {
+                let presets = [1u32, 3, 5, 10, 15, 25, 45, 60];
+                let w = (right - left) / presets.len() as f32;
+                for (i, m) in presets.iter().enumerate() {
+                    let x = left + i as f32 * w;
+                    list.push((rect(x + 2.0 * s, y, x + w - 2.0 * s, y + 28.0 * s), Control::ClockPreset(*m)));
+                }
+            }
+            y += (28.0 + 16.0) * s;
+            let mid = (left + right) / 2.0;
+            list.push((rect(mid - 128.0 * s, y, mid - 6.0 * s, y + 34.0 * s), Control::ClockStart));
+            list.push((rect(mid + 6.0 * s, y, mid + 128.0 * s, y + 34.0 * s), Control::ClockReset));
             return list;
         }
         if self.tab == CALENDAR_TAB {
@@ -1355,8 +1641,9 @@ impl Notch {
         if self.open.target != target {
             self.open.target = target;
             if open {
-                // Opening replaces the volume indicator.
+                // Opening replaces the volume indicator and any banner.
                 self.osd_room.target = 0.0;
+                self.banner_room.target = 0.0;
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_OSD);
                 }
@@ -1369,6 +1656,7 @@ impl Notch {
                 self.stats = self.sampler.sample();
                 self.refresh_controls();
                 displays::refresh();
+                battery::refresh(self.hwnd, WM_BATTERIES);
                 unsafe { SetTimer(Some(self.hwnd), TIMER_REFRESH, 700, None) };
                 self.sync_panel_height(false);
             } else {
@@ -1415,6 +1703,10 @@ impl Notch {
         moving |= self.panel_h.step(dt, 312.5, 35.0);
         moving |= self.privacy_room.step(dt, 312.5, 35.0);
         moving |= self.osd_room.step(dt, 400.0, 34.0);
+        moving |= self.banner_room.step(dt, 400.0, 34.0);
+        if self.banner_room.target == 0.0 && self.banner_room.value < 0.01 {
+            self.banner = None;
+        }
 
         self.render();
         if !moving {
@@ -1560,16 +1852,22 @@ impl Notch {
             rt.PushAxisAlignedClip(&island, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             // Closed: time and date, fading out as it opens.
             let closed_all = self.content * (1.0 - o * 2.5).clamp(0.0, 1.0);
-            let osd = self.osd_room.value.clamp(0.0, 1.0);
-            // The volume indicator takes the closed island's place for a moment.
+            let osd = self.osd_room.value.clamp(0.0, 1.0).max(self.banner_room.value.clamp(0.0, 1.0));
+            // The volume indicator or a banner takes the closed island's place for a moment.
             let closed = closed_all * (1.0 - osd * 1.6).clamp(0.0, 1.0);
-            if closed_all > 0.0 && osd > 0.01 {
+            let banner = self.banner_room.value.clamp(0.0, 1.0);
+            if closed_all > 0.0 && banner > 0.01 {
+                self.draw_banner(island, closed_all * ((banner - 0.35) / 0.65).clamp(0.0, 1.0));
+            }
+            let volume = self.osd_room.value.clamp(0.0, 1.0) * (1.0 - banner);
+            if closed_all > 0.0 && volume > 0.01 {
                 let cy = island.top + BAR * s / 2.0;
-                self.draw_osd(island, cy, closed_all * ((osd - 0.35) / 0.65).clamp(0.0, 1.0));
+                self.draw_osd(island, cy, closed_all * ((volume - 0.35) / 0.65).clamp(0.0, 1.0));
             }
             if closed > 0.0 {
                 let (tw, th) = self.text_size(&self.time, &self.time_format);
-                let (dw, dh) = self.text_size(&self.date, &self.date_format);
+                let (date, counting) = self.closed_date();
+                let (dw, dh) = self.text_size(&date, &self.date_format);
                 let total = tw + 8.0 * s + dw;
                 let cy = island.top + BAR * s / 2.0;
                 let m = self.music.value.clamp(0.0, 1.0);
@@ -1592,11 +1890,12 @@ impl Notch {
                     self.draw_privacy_dots(island.right - 14.0 * s, cy, a);
                 }
                 self.text(&self.time, &self.time_format, pt(x, cy - th / 2.0), ink_color(0.95 * closed), tw + 4.0);
+                let date_color = if counting { with_alpha(accent(), closed) } else { ink_color(0.65 * closed) };
                 self.text(
-                    &self.date,
+                    &date,
                     &self.date_format,
                     pt(date_x, cy - dh / 2.0),
-                    ink_color(0.65 * closed),
+                    date_color,
                     dw + 4.0,
                 );
             }
@@ -1832,6 +2131,26 @@ impl Notch {
         }
     }
 
+    /// The Timer tab: the big readout and what it is counting.
+    fn draw_timer(&self, island: D2D_RECT_F, alpha: f32) {
+        let s = self.scale;
+        let ink = |a: f32| ink_color(a * alpha);
+        let mid = (island.left + island.right) / 2.0;
+        let y = island.top + BAR * s + PAD * 0.7 * s + (CHOICE_HEIGHT + 14.0) * s;
+        let text = self.clockwork.text();
+        let (tw, th) = self.text_size(&text, &self.clock_format);
+        let color = if self.clockwork.running() { with_alpha(accent(), alpha) } else { ink(0.95) };
+        self.text(&text, &self.clock_format, pt(mid - tw / 2.0, y + (56.0 * s - th) / 2.0), color, tw + 8.0);
+        let note = match self.clockwork.mode {
+            ClockMode::Pomodoro if self.clockwork.focus => format!("{} · {}/4", t("Odaklan", "Focus"), self.clockwork.round),
+            ClockMode::Pomodoro => t("Mola", "Break").to_string(),
+            ClockMode::Timer => t("Bitince notch haber verir", "The notch tells you when it is done").to_string(),
+            ClockMode::Stopwatch => String::new(),
+        };
+        let (nw, _) = self.text_size(&note, &self.small_format);
+        self.text(&note, &self.small_format, pt(mid - nw / 2.0, y + 58.0 * s), ink(0.5), nw + 4.0);
+    }
+
     /// The Calendar tab: a Monday-first month grid with today marked.
     /// The Settings tab's row titles and a note; the options are controls.
     fn draw_settings(&self, island: D2D_RECT_F, alpha: f32) {
@@ -2058,7 +2377,7 @@ impl Notch {
             let dots_left = self.draw_privacy_dots(island.right - 16.0 * s, cy, alpha);
             let (lw, lh) = self.text_size(&label, &self.date_format);
             // Between the tabs and the dots.
-            let tabs_right = (island.left + island.right) / 2.0 + 40.0 * s * TABS.len() as f32 / 2.0;
+            let tabs_right = (island.left + island.right) / 2.0 + TAB_WIDTH * s * TABS.len() as f32 / 2.0;
             let limit = (dots_left - 4.0 * s - tabs_right - 8.0 * s).max(0.0);
             let x = dots_left - 4.0 * s - lw.min(limit);
             self.text(&label, &self.date_format, pt(x, cy - lh / 2.0), ink(0.8), limit);
@@ -2073,6 +2392,7 @@ impl Notch {
             STATUS_TAB => self.draw_status(island, alpha),
             WEATHER_TAB => self.draw_weather(island, alpha),
             CALENDAR_TAB => self.draw_calendar(island, alpha),
+            TIMER_TAB => self.draw_timer(island, alpha),
             _ => {}
         }
         for (r, control) in self.controls(island) {
@@ -2312,6 +2632,59 @@ impl Notch {
                     self.text(&place.region, &self.small_format, pt(rx, cy - rh / 2.0), ink(0.5), r.right - 8.0 * s - rx);
                 }
                 Control::Update => {}
+                Control::ClockMode(i) => {
+                    let selected = self.clockwork.mode == ClockMode::ALL[i];
+                    let hot = hovered == Some(Control::ClockMode(i));
+                    let radius = (r.bottom - r.top) / 2.0;
+                    if i == 0 {
+                        let track = rect(r.left, r.top, r.left + (r.right - r.left) * ClockMode::ALL.len() as f32, r.bottom);
+                        self.fill_rounded(track, radius, ink(0.06));
+                    }
+                    let inner = rect(r.left + 2.0 * s, r.top + 2.0 * s, r.right - 2.0 * s, r.bottom - 2.0 * s);
+                    if selected {
+                        self.fill_rounded(inner, radius - 2.0 * s, with_alpha(accent(), alpha));
+                    } else if hot {
+                        self.fill_rounded(inner, radius - 2.0 * s, ink(0.08));
+                    }
+                    let label = ClockMode::ALL[i].label();
+                    let (lw, lh) = self.text_size(label, &self.title_format);
+                    let color = if selected { with_alpha(on_accent(), alpha) } else { ink(if hot { 0.95 } else { 0.7 }) };
+                    self.text(label, &self.title_format, pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0), color, lw + 4.0);
+                }
+                Control::ClockPreset(minutes) => {
+                    let chosen = self.clockwork.length == Duration::from_secs(minutes as u64 * 60);
+                    let hot = hovered == Some(Control::ClockPreset(minutes));
+                    let bg = if chosen { 0.16 } else if hot { 0.10 } else { 0.05 };
+                    self.fill_rounded(r, (r.bottom - r.top) / 2.0, ink(bg));
+                    let label = format!("{minutes} {}", t("dk", "min"));
+                    let (lw, lh) = self.text_size(&label, &self.small_format);
+                    self.text(&label, &self.small_format, pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0), ink(if chosen { 0.95 } else { 0.7 }), lw + 4.0);
+                }
+                Control::ClockStart | Control::ClockReset => {
+                    let start = control == Control::ClockStart;
+                    let hot = hovered == Some(control.clone());
+                    let pressed = self.pressed == Some(control.clone());
+                    let radius = (r.bottom - r.top) / 2.0;
+                    let label = if !start {
+                        t("Sıfırla", "Reset")
+                    } else if self.clockwork.running() {
+                        t("Duraklat", "Pause")
+                    } else if self.clockwork.active() {
+                        t("Devam", "Resume")
+                    } else {
+                        t("Başlat", "Start")
+                    };
+                    let (lw, lh) = self.text_size(label, &self.title_format);
+                    let text_at = pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0);
+                    if start {
+                        let k = if pressed { 0.85 } else if hot { 0.92 } else { 1.0 };
+                        self.fill_rounded(r, radius, with_alpha(accent(), alpha * k));
+                        self.text(label, &self.title_format, text_at, with_alpha(on_accent(), alpha), lw + 4.0);
+                    } else {
+                        self.fill_rounded(r, radius, ink(if pressed { 0.16 } else if hot { 0.11 } else { 0.06 }));
+                        self.text(label, &self.title_format, text_at, ink(0.85), lw + 4.0);
+                    }
+                }
                 Control::Quit => {
                     let hot = hovered == Some(Control::Quit);
                     let pressed = self.pressed == Some(Control::Quit);
@@ -2370,6 +2743,12 @@ impl Notch {
                 self.internet,
             ),
             Tile::Output => (ICON_VOLUME, t("Ses çıkışı", "Sound output").to_string(), output_name, false),
+            Tile::Battery(i) => {
+                let device = self.batteries.get(i);
+                let name = device.map(|d| d.name.clone()).unwrap_or_default();
+                let level = device.map_or(0.0, |d| d.percent as f32 / 100.0);
+                (ICON_HEADPHONES, name, format!("{} {}", i18n::percent(level), t("pil", "battery")), false)
+            }
         };
         let pressed = self.pressed == Some(Control::Tile(tile));
         let lift = if hot && !pressed { 0.5 * s } else { 0.0 };
@@ -2647,6 +3026,7 @@ impl Notch {
             Control::CalendarTitle => self.month = (self.today.0, self.today.1),
             Control::Tile(Tile::Network) => shell::launch("ms-settings:network-status"),
             // Windows 11's sound output picker.
+            Control::Tile(Tile::Battery(_)) => shell::launch("ms-settings:bluetooth"),
             Control::Tile(Tile::Output) => shell::press_keys(&[VK_LWIN, VK_CONTROL, VIRTUAL_KEY(b'V' as u16)]),
             Control::Tile(tile @ (Tile::Wifi | Tile::Bluetooth)) => {
                 let (kind, on) = match tile {
@@ -2692,6 +3072,29 @@ impl Notch {
                 }
             }
             Control::Quit => crate::dock::quit(),
+            Control::ClockMode(i) => {
+                if self.clockwork.mode != ClockMode::ALL[i] {
+                    self.clockwork.reset();
+                    self.clockwork.mode = ClockMode::ALL[i];
+                    self.update_clockwork_timer();
+                }
+            }
+            Control::ClockPreset(minutes) => {
+                self.clockwork.reset();
+                self.clockwork.length = Duration::from_secs(minutes as u64 * 60);
+                self.update_clockwork_timer();
+            }
+            Control::ClockStart => {
+                match self.clockwork.since.take() {
+                    Some(at) => self.clockwork.banked += at.elapsed(),
+                    None => self.clockwork.since = Some(Instant::now()),
+                }
+                self.update_clockwork_timer();
+            }
+            Control::ClockReset => {
+                self.clockwork.reset();
+                self.update_clockwork_timer();
+            }
             Control::Update => crate::update::install_available(),
             Control::CityField => self.start_city_edit(),
             Control::CityAuto => {
@@ -2789,6 +3192,7 @@ impl Notch {
         n.music = Spring::new(1.0);
         n.bars = [0.55, 0.8, 0.65, 0.4];
         n.app_volume = Some(audio::AppVolume { volume: 0.8, muted: false });
+        n.batteries = vec![battery::Device { name: t("Kulaklık", "Headphones").into(), percent: 80 }];
         let hour = |hour, temperature, code| weather::Hour { hour, temperature, code, day: true };
         let day = |d, high, low, code| weather::Day { date: (n.today.0, n.today.1, d), high, low, code };
         let next = |k: u32| ((n.today.2 + k - 1) % 28) + 1;
@@ -2858,6 +3262,31 @@ impl Notch {
             n.render();
             save(&n, name)?;
         }
+        // The timer: running with 4:32 left, in its tab and on the closed island.
+        n.clockwork.mode = ClockMode::Timer;
+        n.clockwork.length = Duration::from_secs(5 * 60);
+        n.clockwork.banked = Duration::from_secs(28);
+        n.clockwork.since = Some(Instant::now());
+        n.tab = TIMER_TAB;
+        n.sync_panel_height(false);
+        n.render();
+        save(&n, "timer")?;
+        n.open.target = 0.0;
+        step(&mut n, 40);
+        save(&n, "closed-timer")?;
+        n.clockwork.reset();
+        // Its alarm.
+        n.banner = Some(Banner { glyph: ICON_ALARM, title: t("Süre doldu", "Time's up").into(), body: String::new() });
+        n.banner_room = Spring::new(1.0);
+        n.render();
+        save(&n, "banner")?;
+        n.banner = Some(Banner {
+            glyph: ICON_ALARM,
+            title: t("Mola zamanı", "Time for a break").into(),
+            body: t("Biraz dinlen", "Rest a little").into(),
+        });
+        n.render();
+        save(&n, "banner-two-lines")?;
         Ok(())
     }
 
@@ -3014,6 +3443,8 @@ struct Formats {
     play: IDWriteTextFormat,
     big: IDWriteTextFormat,
     big_icon: IDWriteTextFormat,
+    /// The Timer tab's readout.
+    clock: IDWriteTextFormat,
     /// Segoe UI Symbol, for the weather glyphs Segoe Fluent Icons lacks.
     symbol: IDWriteTextFormat,
     big_symbol: IDWriteTextFormat,
@@ -3071,6 +3502,7 @@ impl Formats {
             play: icons(18.0)?,
             big: text(26.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             big_icon: icons(28.0)?,
+            clock: text(40.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             symbol: symbols(15.0)?,
             big_symbol: symbols(30.0)?,
         })
@@ -3095,6 +3527,16 @@ fn demo_art() -> media::Art {
         }
     }
     media::Art { width: n, height: n, pixels }
+}
+
+/// Windows' own alarm sound, once.
+fn play_alarm() {
+    use windows::Win32::Media::Audio::{PlaySoundW, SND_ASYNC, SND_FILENAME, SND_NODEFAULT};
+    let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
+    let path = crate::util::wide(&format!(r"{windir}\Media\Alarm01.wav"));
+    unsafe {
+        let _ = PlaySoundW(crate::util::pcwstr(&path), None, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+    }
 }
 
 fn weather_icon(w: &weather::Weather) -> char {
@@ -3226,6 +3668,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER => {
             let notch = &mut *ptr;
             match wparam.0 {
+                TIMER_CLOCKWORK => notch.on_clockwork(),
+                TIMER_BANNER => {
+                    let _ = KillTimer(Some(hwnd), TIMER_BANNER);
+                    notch.banner_room.target = 0.0;
+                    notch.start_animation();
+                }
                 TIMER_OSD => {
                     let _ = KillTimer(Some(hwnd), TIMER_OSD);
                     notch.osd_room.target = 0.0;
@@ -3293,6 +3741,25 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_PLACES => {
             (*ptr).on_places();
+            LRESULT(0)
+        }
+        WM_BATTERIES => {
+            let notch = &mut *ptr;
+            notch.batteries = battery::current();
+            notch.sync_panel_height(true);
+            notch.render();
+            LRESULT(0)
+        }
+        WM_NOTIFICATIONS => {
+            let notch = &mut *ptr;
+            // The newest one; none over a fullscreen game or the open notch.
+            let toasts = notifications::take();
+            if let Some(toast) = toasts.last() {
+                if notch.settings.notifications && !notch.hidden_for_fullscreen && notch.open.target < 0.5 {
+                    let body = if toast.body.is_empty() { toast.app.clone() } else { format!("{} · {}", toast.app, toast.body) };
+                    notch.show_banner(ICON_BELL, toast.title.clone(), body, 6);
+                }
+            }
             LRESULT(0)
         }
         WM_SHOW_SETTINGS => {

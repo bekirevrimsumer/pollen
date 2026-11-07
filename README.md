@@ -50,6 +50,17 @@ Task Manager, one 1 MB program.
     <td align="center">Closed: what is playing, the volume indicator</td>
   </tr>
   <tr>
+    <td><img src="docs/screenshots/notch-timer.png" alt="Timer"></td>
+    <td>
+      <img src="docs/screenshots/notch-closed-timer.png" alt="Closed notch with the timer running"><br><br>
+      <img src="docs/screenshots/notch-banner-two-lines.png" alt="A banner on the notch">
+    </td>
+  </tr>
+  <tr>
+    <td align="center">Timer, stopwatch and pomodoro</td>
+    <td align="center">The time left on the closed notch; a banner when it is up (and for new notifications)</td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/notch-music-light.png" alt="Light theme: Music"></td>
     <td><img src="docs/screenshots/notch-weather-latte.png" alt="Latte theme: Weather"></td>
   </tr>
@@ -158,7 +169,18 @@ Command line: `Pollen.exe --install` installs or updates without asking,
   (camera) dot shows on the closed island and the app's name in the open one. Read
   from what Windows records about each app's use, waiting for changes (no polling)
 - Volume: changing it from the keyboard or elsewhere widens the closed island for
-  a moment to show the level (Windows' own indicator still shows too)
+  a moment to show the level (Windows' own indicator still shows too; Windows 11
+  draws it inside Explorer, with no window another program could hide)
+- Timer: a timer with quick lengths, a stopwatch and a pomodoro (25 minutes of
+  focus, 5-minute breaks, a 15-minute one every fourth round). The closed island
+  shows the time left; when it is up, a banner and Windows' alarm sound
+- Notifications: a new Windows notification shows on the closed island for a few
+  seconds (not over fullscreen games; Settings › Notifications turns it off). Windows
+  only lets packaged apps subscribe to notifications, so Pollen checks the write time
+  of Windows' notification store every 1.5 s (microseconds) and reads the list only
+  when it changed
+- Headphones: Bluetooth devices that report a battery level get a tile in the
+  Control Center
 - Calendar: a plain month view (Monday first), today highlighted, previous / next
   month. No accounts or calendar sync
 - Settings: the language (Auto follows Windows; Türkçe or English), the dock's mode,

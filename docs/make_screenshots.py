@@ -108,14 +108,14 @@ def main():
         save(crop_around(canvas, (x0 + l, y0 + t, x0 + r, y0 + b), 20), f"{name}.png")
 
     # Each notch state, cropped around it.
-    for name in ["closed", "volume", "music", "control-center", "status", "weather", "calendar", "settings"]:
+    for name in ["closed", "volume", "music", "control-center", "status", "weather", "calendar", "settings", "timer", "closed-timer", "banner-two-lines"]:
         layer = load(folder, f"notch-{name}.png")
         canvas = wall.copy()
         place_top(canvas, layer)
         x0 = (W - layer.width) // 2
         l, t, r, b = layer.getbbox()
         box = (x0 + l, 0, x0 + r, b)
-        if name in ("closed", "volume"):
+        if name in ("closed", "volume", "closed-timer", "banner-two-lines"):
             shot = crop_around(canvas, (W // 2 - 200, 0, W // 2 + 200, b), 24)
         else:
             shot = crop_around(canvas, box, 28)

@@ -398,6 +398,8 @@ pub struct Settings {
     pub language: Language,
     /// Look for a newer Pollen on GitHub once a day.
     pub check_updates: bool,
+    /// Show new Windows notifications on the notch for a moment.
+    pub notifications: bool,
 }
 
 impl Default for Settings {
@@ -410,6 +412,7 @@ impl Default for Settings {
             theme: Theme::Midnight,
             language: Language::Auto,
             check_updates: true,
+            notifications: true,
         }
     }
 }
@@ -434,6 +437,7 @@ fn read_file() -> Settings {
             "theme" => settings.theme = Theme::parse(value).unwrap_or(settings.theme),
             "language" => settings.language = Language::parse(value).unwrap_or(settings.language),
             "check-updates" => settings.check_updates = value.trim() != "off",
+            "notifications" => settings.notifications = value.trim() != "off",
             "opacity" => {
                 if let Ok(v) = value.trim().parse::<f32>() {
                     settings.opacity = (v / 100.0).clamp(MIN_OPACITY, 1.0);
@@ -522,14 +526,15 @@ pub fn write_file(settings: &Settings) {
         let _ = std::fs::write(
             p,
             format!(
-                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\n",
+                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\nnotifications={}\n",
                 settings.dock_mode.key(),
                 settings.dock_size.key(),
                 settings.magnify.key(),
                 settings.opacity * 100.0,
                 settings.theme.key(),
                 settings.language.key(),
-                if settings.check_updates { "on" } else { "off" }
+                if settings.check_updates { "on" } else { "off" },
+                if settings.notifications { "on" } else { "off" }
             ),
         );
     }

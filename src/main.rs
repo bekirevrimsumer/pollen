@@ -87,8 +87,93 @@ fn main() -> Result<()> {
                 }
             }
             println!("privacy: {:?}", controls::privacy::read());
+            println!("batteries: {:?}", controls::battery::read());
             let mut meter = controls::audio::Meter::new();
             println!("peaks: {:?}", meter.peaks());
+            return Ok(());
+        }
+        if args.iter().any(|a| a == "--toast-events") {
+            // Which window events does a notification popup cause?
+            unsafe extern "system" fn seen(
+                _: windows::Win32::UI::Accessibility::HWINEVENTHOOK,
+                event: u32,
+                hwnd: windows::Win32::Foundation::HWND,
+                object: i32,
+                _: i32,
+                _: u32,
+                _: u32,
+            ) {
+                if object != 0 || hwnd.0.is_null() {
+                    return;
+                }
+                let mut class = [0u16; 128];
+                let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut class);
+                let mut title = [0u16; 128];
+                let m = windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(hwnd, &mut title);
+                let class = String::from_utf16_lossy(&class[..n as usize]);
+                if class.contains("CoreWindow") || class.contains("Xaml") || class.contains("Toast") || class.contains("Notification") {
+                    println!("event {event:#06x} class {class} title '{}'", String::from_utf16_lossy(&title[..m as usize]));
+                }
+            }
+            use windows::Win32::UI::Accessibility::SetWinEventHook;
+            use windows::Win32::UI::WindowsAndMessaging::{PeekMessageW, PM_REMOVE, WINEVENT_OUTOFCONTEXT};
+            let _hooks: Vec<_> = [(0x0002u32, 0x0002u32), (0x8002, 0x8002), (0x8017, 0x8018), (0x800C, 0x800C)]
+                .into_iter()
+                .map(|(a, b)| SetWinEventHook(a, b, None, Some(seen), 0, 0, WINEVENT_OUTOFCONTEXT))
+                .collect();
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while std::time::Instant::now() < until {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    DispatchMessageW(&msg);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            return Ok(());
+        }
+        if args.iter().any(|a| a == "--notify-watch") {
+            // Starts the watcher and prints what it catches for a while.
+            controls::notifications::start(windows::Win32::Foundation::HWND::default(), 0);
+            for _ in 0..12 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                for toast in controls::notifications::take() {
+                    if toast.title.starts_with("Pollen test") {
+                        println!("caught: [{}] {} | {}", toast.app, toast.title, toast.body);
+                    } else {
+                        println!("caught one from {}", toast.app);
+                    }
+                }
+            }
+            return Ok(());
+        }
+        if args.iter().any(|a| a == "--notify-test") {
+            // Can an unpackaged program read Windows' notifications?
+            let result = std::thread::spawn(|| {
+                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                use windows::UI::Notifications::Management::UserNotificationListener;
+                let listener = match UserNotificationListener::Current() {
+                    Ok(l) => l,
+                    Err(e) => return format!("Current() failed: {e}"),
+                };
+                let status = listener.GetAccessStatus().map(|s| s.0);
+                let request = listener.RequestAccessAsync().and_then(|op| op.get()).map(|s| s.0);
+                use windows::UI::Notifications::NotificationKinds;
+                let count = listener.GetNotificationsAsync(NotificationKinds::Toast).and_then(|op| op.get()).and_then(|list| list.Size());
+                let started = std::time::Instant::now();
+                for _ in 0..20 {
+                    let _ = listener.GetNotificationsAsync(NotificationKinds::Toast).and_then(|op| op.get()).and_then(|list| list.Size());
+                }
+                println!("one read: {:.1} ms", started.elapsed().as_secs_f64() * 1000.0 / 20.0);
+                let handler = windows::Foundation::TypedEventHandler::new(|_, _| Ok(()));
+                let subscribe = listener.NotificationChanged(&handler);
+                format!(
+                    "access status {status:?}, request {request:?} (0 unspecified, 1 allowed, 2 denied); notifications now: {count:?}; change event: {:?}",
+                    subscribe.map(|_| "subscribed")
+                )
+            })
+            .join()
+            .unwrap_or_default();
+            println!("{result}");
             return Ok(());
         }
         if args.iter().any(|a| a == "--check-update") {
