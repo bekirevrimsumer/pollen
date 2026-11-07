@@ -2,7 +2,7 @@
 
 use windows::core::GUID;
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
+use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
 use windows::Win32::Media::Audio::{eMultimedia, eRender, IMMDevice, IMMDeviceEnumerator, MMDeviceEnumerator};
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
 use windows::Win32::System::Com::{CoCreateInstance, CoTaskMemFree, CLSCTX_ALL, STGM_READ};
@@ -65,5 +65,45 @@ pub fn toggle_mute() {
     unsafe {
         let muted = volume.GetMute().map(|m| m.as_bool()).unwrap_or(false);
         let _ = volume.SetMute(!muted, &GUID::zeroed());
+    }
+}
+
+/// The output's current loudness per channel, for the notch's level bars.
+/// Keeps the meter between calls and picks up a new default device every few
+/// seconds.
+pub struct Meter {
+    meter: Option<(IAudioMeterInformation, std::time::Instant)>,
+}
+
+impl Meter {
+    pub fn new() -> Self {
+        Meter { meter: None }
+    }
+
+    /// Left and right peak levels, 0..=1.
+    pub fn peaks(&mut self) -> (f32, f32) {
+        let stale = self.meter.as_ref().is_none_or(|(_, at)| at.elapsed().as_secs() >= 5);
+        if stale {
+            self.meter = unsafe {
+                let devices: Option<IMMDeviceEnumerator> = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok();
+                devices
+                    .and_then(|d| d.GetDefaultAudioEndpoint(eRender, eMultimedia).ok())
+                    .and_then(|d| d.Activate::<IAudioMeterInformation>(CLSCTX_ALL, None).ok())
+                    .map(|m| (m, std::time::Instant::now()))
+            };
+        }
+        let Some((meter, _)) = &self.meter else { return (0.0, 0.0) };
+        unsafe {
+            let count = meter.GetMeteringChannelCount().unwrap_or(0).clamp(0, 8) as usize;
+            if count == 0 {
+                let p = meter.GetPeakValue().unwrap_or(0.0);
+                return (p, p);
+            }
+            let mut values = vec![0f32; count];
+            if meter.GetChannelsPeakValues(&mut values).is_err() {
+                return (0.0, 0.0);
+            }
+            (values[0], if count > 1 { values[1] } else { values[0] })
+        }
     }
 }

@@ -16,6 +16,8 @@ windows = { version = "0.61", features = [
   "Win32_Media_Audio_Endpoints",
   "Win32_Networking_NetworkListManager",
   "Devices_Radios",
+  "Media_Control",
+  "Storage_Streams",
   "Foundation",
   "Foundation_Collections",
   "Win32_Graphics_Gdi",

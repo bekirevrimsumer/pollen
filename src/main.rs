@@ -45,6 +45,23 @@ fn main() -> Result<()> {
             });
             let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
             println!("radios: {:?}", controls::network::radios());
+            // WinRT async calls need a multithreaded apartment; this thread is STA.
+            let media = std::thread::spawn(controls::media::read_now).join().unwrap_or_default();
+            println!("media current: {:?}", media.current);
+            for t in &media.tracks {
+                println!(
+                    "track: [{}] '{}' - '{}' playing={} {}/{} ms art={:?}",
+                    t.app_name,
+                    t.title,
+                    t.artist,
+                    t.playing,
+                    t.position_now(),
+                    t.duration_ms,
+                    t.art.as_ref().map(|a| (a.width, a.height))
+                );
+            }
+            let mut meter = controls::audio::Meter::new();
+            println!("peaks: {:?}", meter.peaks());
             return Ok(());
         }
         if let Some(i) = args.iter().position(|a| a == "--snapshot") {

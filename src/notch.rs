@@ -12,6 +12,7 @@
 //! computer has them) tiles, a row of shortcut buttons, and sliders for the volume
 //! and for every monitor's brightness on its own.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -19,10 +20,13 @@ use windows::core::{w, Result};
 use windows::Devices::Radios::RadioKind;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D_RECT_F, D2D_SIZE_F,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED, D2D1_PIXEL_FORMAT,
+    D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1Factory, ID2D1PathGeometry, ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+    D2D1CreateFactory, ID2D1Bitmap, ID2D1Factory, ID2D1PathGeometry, ID2D1SolidColorBrush,
+    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_BITMAP_BRUSH_PROPERTIES, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+    D2D1_BITMAP_PROPERTIES, D2D1_EXTEND_MODE_CLAMP,
     D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
     D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
@@ -33,6 +37,7 @@ use windows::Win32::Graphics::DirectWrite::{
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
     DWRITE_WORD_WRAPPING_NO_WRAP,
 };
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
@@ -48,10 +53,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_POPUP,
 };
-use windows_numerics::Vector2;
+use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::Spring;
-use crate::controls::{audio, displays, network};
+use crate::controls::{audio, displays, media, network};
 use crate::pacer;
 use crate::render::Surface;
 use crate::shell;
@@ -82,11 +87,17 @@ const ON_ACCENT: D2D1_COLOR_F = rgba(0.04, 0.06, 0.12, 1.0);
 const TIMER_COLLAPSE: usize = 1;
 const TIMER_CLOCK: usize = 2;
 const TIMER_REFRESH: usize = 3;
+/// Level bars and the progress bar while something plays (~30 fps).
+const TIMER_LEVEL: usize = 4;
+/// The album art in the open Music tab.
+const ART: f32 = 76.0;
 
 /// Posted by the display worker when monitors or values change.
 const WM_DISPLAYS: u32 = WM_APP + 4;
 /// Posted when the radios were read again.
 const WM_RADIOS: u32 = WM_APP + 5;
+/// Posted by the media worker when what is playing changes.
+const WM_MEDIA: u32 = WM_APP + 6;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 // Segoe Fluent Icons.
@@ -103,6 +114,10 @@ const ICON_BRIGHTNESS: char = '\u{E706}';
 const ICON_BELL: char = '\u{EA8F}';
 const ICON_GEAR: char = '\u{E713}';
 const ICON_DISPLAY: char = '\u{E7F4}';
+const ICON_PREVIOUS: char = '\u{E892}';
+const ICON_PLAY: char = '\u{E768}';
+const ICON_PAUSE: char = '\u{E769}';
+const ICON_NEXT: char = '\u{E893}';
 
 static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -178,9 +193,21 @@ enum Slider {
     Brightness(String),
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum MediaButton {
+    Previous,
+    PlayPause,
+    Next,
+}
+
 #[derive(Clone, PartialEq, Debug)]
 enum Control {
     Tab(usize),
+    /// Picks which player the Music tab shows (by AppUserModelID).
+    Player(String),
+    Media(MediaButton),
+    /// The progress bar: click to seek.
+    Progress,
     Tile(Tile),
     Button(Button),
     /// The slider's track (drag / click / wheel).
@@ -190,7 +217,8 @@ enum Control {
 }
 
 /// Tabs: (icon, available yet).
-const TABS: [(char, bool); 4] = [(ICON_MUSIC, false), (ICON_CONTROLS, true), (ICON_STATUS, false), (ICON_CALENDAR, false)];
+const TABS: [(char, bool); 4] = [(ICON_MUSIC, true), (ICON_CONTROLS, true), (ICON_STATUS, false), (ICON_CALENDAR, false)];
+const MUSIC_TAB: usize = 0;
 const CONTROL_CENTER_TAB: usize = 1;
 
 pub struct Notch {
@@ -234,6 +262,20 @@ pub struct Notch {
     internet: bool,
     radios: network::Radios,
     displays: Vec<displays::Display>,
+    /// What is playing.
+    media: media::Snapshot,
+    /// The player picked in the Music tab, if not the default one.
+    player: Option<String>,
+    /// Album art bitmaps, by track key.
+    art: HashMap<String, ID2D1Bitmap>,
+    meter: audio::Meter,
+    /// Level bars in the closed island, 0..1 each.
+    bars: [f32; 4],
+    level_running: bool,
+    /// 0..1: how much room the closed island gives to the playing track.
+    music: Spring,
+    track_format: IDWriteTextFormat,
+    play_format: IDWriteTextFormat,
     /// `--snapshot`: never shown, draws on an opaque backdrop.
     headless: bool,
 }
@@ -318,6 +360,15 @@ impl Notch {
                 internet: false,
                 radios: network::Radios::default(),
                 displays: Vec::new(),
+                media: media::Snapshot::default(),
+                player: None,
+                art: HashMap::new(),
+                meter: audio::Meter::new(),
+                bars: [0.0; 4],
+                level_running: false,
+                music: Spring::new(0.0),
+                track_format: formats.track,
+                play_format: formats.play,
                 headless,
             });
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, notch.as_mut() as *mut Notch as isize);
@@ -328,6 +379,7 @@ impl Notch {
                 return Ok(notch);
             }
             displays::start(hwnd, WM_DISPLAYS);
+            media::start(hwnd, WM_MEDIA);
             network::refresh_radios(|| post(WM_RADIOS));
 
             // Nectar's opening: a circle rises to the edge, flattens, spreads out.
@@ -360,6 +412,8 @@ impl Notch {
                     self.small_format = f.small;
                     self.icon_format = f.icon;
                     self.tab_icon_format = f.tab_icon;
+                    self.track_format = f.track;
+                    self.play_format = f.play;
                 }
             }
             let m = info.rcMonitor;
@@ -383,6 +437,7 @@ impl Notch {
             unsafe {
                 let _ = ShowWindow(self.hwnd, if hide { SW_HIDE } else { SW_SHOWNOACTIVATE });
             }
+            self.update_level();
         }
     }
 
@@ -414,6 +469,99 @@ impl Notch {
         }
     }
 
+    // ---- media ---------------------------------------------------------------
+
+    /// The track the notch shows: the picked player, else what plays, else
+    /// Windows' current session.
+    fn track(&self) -> Option<&media::Track> {
+        let tracks = &self.media.tracks;
+        self.player
+            .as_ref()
+            .and_then(|p| tracks.iter().find(|t| &t.app == p))
+            .or_else(|| tracks.iter().find(|t| t.playing))
+            .or_else(|| self.media.current.as_ref().and_then(|c| tracks.iter().find(|t| &t.app == c)))
+            .or_else(|| tracks.first())
+    }
+
+    fn playing(&self) -> bool {
+        self.media.tracks.iter().any(|t| t.playing)
+    }
+
+    fn on_media(&mut self) {
+        self.apply_media(media::snapshot());
+    }
+
+    fn apply_media(&mut self, snapshot: media::Snapshot) {
+        self.media = snapshot;
+        if let Some(p) = &self.player {
+            if !self.media.tracks.iter().any(|t| &t.app == p) {
+                self.player = None;
+            }
+        }
+        let keys: Vec<String> = self.media.tracks.iter().map(|t| t.key.clone()).collect();
+        self.art.retain(|k, _| keys.contains(k));
+        for track in &self.media.tracks {
+            let Some(art) = &track.art else { continue };
+            if self.art.contains_key(&track.key) {
+                continue;
+            }
+            let props = D2D1_BITMAP_PROPERTIES {
+                pixelFormat: D2D1_PIXEL_FORMAT {
+                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+                },
+                dpiX: 96.0,
+                dpiY: 96.0,
+            };
+            let bitmap = unsafe {
+                self.surface.rt.CreateBitmap(
+                    D2D_SIZE_U { width: art.width, height: art.height },
+                    Some(art.pixels.as_ptr() as *const _),
+                    art.width * 4,
+                    &props,
+                )
+            };
+            if let Ok(bitmap) = bitmap {
+                self.art.insert(track.key.clone(), bitmap);
+            }
+        }
+        self.music.target = if self.playing() { 1.0 } else { 0.0 };
+        self.update_level();
+        self.start_animation();
+        self.render();
+    }
+
+    /// Runs the level/progress timer only while something plays and the notch
+    /// is on screen (and a little longer, to let the bars fall).
+    fn update_level(&mut self) {
+        let want = !self.headless
+            && !self.hidden_for_fullscreen
+            && (self.playing() || self.bars.iter().any(|b| *b > 0.01));
+        if want != self.level_running {
+            self.level_running = want;
+            unsafe {
+                if want {
+                    SetTimer(Some(self.hwnd), TIMER_LEVEL, 33, None);
+                } else {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_LEVEL);
+                }
+            }
+        }
+    }
+
+    fn on_level(&mut self) {
+        let (l, r) = if self.playing() { self.meter.peaks() } else { (0.0, 0.0) };
+        // Square roots lift quiet passages so the bars stay readable.
+        let (l, r) = (l.sqrt(), r.sqrt());
+        let targets = [l * 0.8, (l + r) * 0.55, r * 0.95, l.max(r) * 0.7];
+        for (bar, target) in self.bars.iter_mut().zip(targets) {
+            let rate = if target > *bar { 0.6 } else { 0.18 };
+            *bar += (target.min(1.0) - *bar) * rate;
+        }
+        self.update_level();
+        self.render();
+    }
+
     // ---- layout ------------------------------------------------------------
 
     fn tiles(&self) -> Vec<Tile> {
@@ -435,7 +583,18 @@ impl Notch {
         sliders
     }
 
+    fn music_height(&self) -> f32 {
+        if self.track().is_none() {
+            return 64.0;
+        }
+        let chips = if self.media.tracks.len() > 1 { 30.0 } else { 0.0 };
+        PAD * 0.7 + chips + ART + 14.0 + 16.0 + 8.0 + 40.0 + PAD * 0.8
+    }
+
     fn panel_height(&self) -> f32 {
+        if self.tab == MUSIC_TAB {
+            return self.music_height();
+        }
         let rows = self.tiles().len().div_ceil(2) as f32;
         let sliders = self.sliders().len() as f32;
         PAD * 0.7
@@ -452,7 +611,8 @@ impl Notch {
     fn closed_width(&self) -> f32 {
         let (tw, _) = self.text_size(&self.time, &self.time_format);
         let (dw, _) = self.text_size(&self.date, &self.date_format);
-        (tw + dw + 8.0 * self.scale + 36.0 * self.scale).max(CLOSED_MIN_WIDTH * self.scale)
+        let music = 64.0 * self.scale * self.music.value.clamp(0.0, 1.0);
+        (tw + dw + 8.0 * self.scale + 36.0 * self.scale).max(CLOSED_MIN_WIDTH * self.scale) + music
     }
 
     /// The island right now.
@@ -485,6 +645,10 @@ impl Notch {
         for i in 0..TABS.len() {
             let x = tabs_left + i as f32 * tab_w;
             list.push((rect(x, island.top, x + tab_w, island.top + BAR * s), Control::Tab(i)));
+        }
+        if self.tab == MUSIC_TAB {
+            self.music_controls(island, &mut list);
+            return list;
         }
         if self.tab != CONTROL_CENTER_TAB {
             return list;
@@ -519,6 +683,42 @@ impl Notch {
             y += (SLIDER_HEIGHT + 12.0) * s;
         }
         list
+    }
+
+    /// Player chips, the progress bar and the playback buttons.
+    fn music_controls(&self, island: D2D_RECT_F, list: &mut Vec<(D2D_RECT_F, Control)>) {
+        let s = self.scale;
+        let left = island.left + PAD * s;
+        let right = island.right - PAD * s;
+        let mut y = island.top + BAR * s + PAD * 0.7 * s;
+        if self.media.tracks.len() > 1 {
+            let mut x = left;
+            for track in &self.media.tracks {
+                let (w, _) = self.text_size(&track.app_name, &self.small_format);
+                let chip = rect(x, y, (x + w + 20.0 * s).min(right), y + 22.0 * s);
+                list.push((chip, Control::Player(track.app.clone())));
+                x = chip.right + 6.0 * s;
+                if x > right - 30.0 * s {
+                    break;
+                }
+            }
+            y += 30.0 * s;
+        }
+        if self.track().is_none() {
+            return;
+        }
+        y += (ART + 14.0) * s;
+        list.push((rect(left + 40.0 * s, y, right - 40.0 * s, y + 16.0 * s), Control::Progress));
+        y += (16.0 + 8.0) * s;
+        let cx = (left + right) / 2.0;
+        let gap = 26.0 * s;
+        let (small, big) = (34.0 * s, 40.0 * s);
+        let mid = y + big / 2.0;
+        list.push((rect(cx - big / 2.0, y, cx + big / 2.0, y + big), Control::Media(MediaButton::PlayPause)));
+        let px = cx - big / 2.0 - gap - small;
+        list.push((rect(px, mid - small / 2.0, px + small, mid + small / 2.0), Control::Media(MediaButton::Previous)));
+        let nx = cx + big / 2.0 + gap;
+        list.push((rect(nx, mid - small / 2.0, nx + small, mid + small / 2.0), Control::Media(MediaButton::Next)));
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Control> {
@@ -593,6 +793,9 @@ impl Notch {
         if self.open.target != target {
             self.open.target = target;
             if open {
+                // Music while something plays, otherwise the Control Center.
+                self.tab = if self.playing() { MUSIC_TAB } else { CONTROL_CENTER_TAB };
+                self.player = None;
                 self.refresh_controls();
                 displays::refresh();
                 unsafe { SetTimer(Some(self.hwnd), TIMER_REFRESH, 700, None) };
@@ -634,6 +837,7 @@ impl Notch {
         moving |= self.round_top.step(dt, 312.5, 35.0);
         moving |= self.spread.step(dt, 312.5, 35.0);
         moving |= self.open.step(dt, 312.5, 35.0);
+        moving |= self.music.step(dt, 312.5, 35.0);
 
         self.render();
         if !moving {
@@ -769,8 +973,13 @@ impl Notch {
                 let (tw, th) = self.text_size(&self.time, &self.time_format);
                 let (dw, dh) = self.text_size(&self.date, &self.date_format);
                 let total = tw + 8.0 * s + dw;
-                let x = (island.left + island.right - total) / 2.0;
                 let cy = island.top + BAR * s / 2.0;
+                let m = self.music.value.clamp(0.0, 1.0);
+                if m > 0.01 {
+                    self.draw_closed_music(island, cy, closed * m);
+                }
+                // The text stays centered between the art and the bars.
+                let x = (island.left + island.right - total) / 2.0;
                 self.text(&self.time, &self.time_format, pt(x, cy - th / 2.0), rgba(1.0, 1.0, 1.0, 0.95 * closed), tw + 4.0);
                 self.text(
                     &self.date,
@@ -811,6 +1020,92 @@ impl Notch {
         }
     }
 
+    /// Album art on the left, level bars on the right of the closed island.
+    fn draw_closed_music(&self, island: D2D_RECT_F, cy: f32, alpha: f32) {
+        let s = self.scale;
+        if let Some(track) = self.track() {
+            let a = 22.0 * s;
+            let r = rect(island.left + 12.0 * s, cy - a / 2.0, island.left + 12.0 * s + a, cy + a / 2.0);
+            self.draw_art(track, r, 6.0 * s, alpha);
+        }
+        let (w, gap) = (3.0 * s, 2.5 * s);
+        let total = w * 4.0 + gap * 3.0;
+        let x0 = island.right - 14.0 * s - total;
+        for (i, level) in self.bars.iter().enumerate() {
+            let h = 3.0 * s + level.clamp(0.0, 1.0) * 13.0 * s;
+            let x = x0 + i as f32 * (w + gap);
+            self.fill_rounded(rect(x, cy - h / 2.0, x + w, cy + h / 2.0), w / 2.0, with_alpha(ACCENT, alpha));
+        }
+    }
+
+    /// The track's art with rounded corners, or a note on a tile without art.
+    fn draw_art(&self, track: &media::Track, r: D2D_RECT_F, radius: f32, alpha: f32) {
+        let Some(bitmap) = self.art.get(&track.key) else {
+            self.fill_rounded(r, radius, rgba(1.0, 1.0, 1.0, 0.08 * alpha));
+            self.icon(ICON_MUSIC, &self.icon_format, r, rgba(1.0, 1.0, 1.0, 0.6 * alpha));
+            return;
+        };
+        unsafe {
+            let size = bitmap.GetSize();
+            let props = D2D1_BITMAP_BRUSH_PROPERTIES {
+                extendModeX: D2D1_EXTEND_MODE_CLAMP,
+                extendModeY: D2D1_EXTEND_MODE_CLAMP,
+                interpolationMode: D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
+            };
+            let Ok(brush) = self.surface.rt.CreateBitmapBrush(bitmap, Some(&props), None) else { return };
+            // Cover the box: scale to fill, centered.
+            let k = ((r.right - r.left) / size.width).max((r.bottom - r.top) / size.height);
+            let dx = r.left + ((r.right - r.left) - size.width * k) / 2.0;
+            let dy = r.top + ((r.bottom - r.top) - size.height * k) / 2.0;
+            brush.SetTransform(&Matrix3x2 { M11: k, M12: 0.0, M21: 0.0, M22: k, M31: dx, M32: dy });
+            brush.SetOpacity(alpha);
+            self.surface
+                .rt
+                .FillRoundedRectangle(&D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius }, &brush);
+        }
+    }
+
+    /// The open Music tab's art and text (its buttons are drawn as controls).
+    fn draw_music(&self, island: D2D_RECT_F, alpha: f32) {
+        let s = self.scale;
+        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let left = island.left + PAD * s;
+        let right = island.right - PAD * s;
+        let mut y = island.top + BAR * s + PAD * 0.7 * s;
+        if self.media.tracks.len() > 1 {
+            y += 30.0 * s;
+        }
+        let Some(track) = self.track() else {
+            let text = "Şu an çalan bir şey yok";
+            let (w, h) = self.text_size(text, &self.title_format);
+            let cy = island.top + BAR * s + 64.0 * s / 2.0;
+            self.text(text, &self.title_format, pt((left + right - w) / 2.0, cy - h / 2.0), white(0.55), w + 4.0);
+            return;
+        };
+        let art = rect(left, y, left + ART * s, y + ART * s);
+        self.draw_art(track, art, 10.0 * s, alpha);
+
+        let x = art.right + 14.0 * s;
+        let limit = right - x;
+        let (_, th) = self.text_size(&track.title, &self.track_format);
+        let (_, ah) = self.text_size(&track.artist, &self.title_format);
+        let (_, nh) = self.text_size(&track.app_name, &self.small_format);
+        let top = y + (ART * s - th - ah - nh - 6.0 * s) / 2.0;
+        self.text(&track.title, &self.track_format, pt(x, top), white(0.95), limit);
+        self.text(&track.artist, &self.title_format, pt(x, top + th + 2.0 * s), white(0.65), limit);
+        self.text(&track.app_name, &self.small_format, pt(x, top + th + ah + 6.0 * s), white(0.4), limit);
+
+        // Times beside the progress bar.
+        let bar_y = y + (ART + 14.0) * s;
+        let elapsed = format_time(track.position_now());
+        let total = format_time(track.duration_ms);
+        let (ew, eh) = self.text_size(&elapsed, &self.small_format);
+        let (tw, _) = self.text_size(&total, &self.small_format);
+        let cy = bar_y + 8.0 * s;
+        self.text(&elapsed, &self.small_format, pt(left + 34.0 * s - ew, cy - eh / 2.0), white(0.55), ew + 4.0);
+        self.text(&total, &self.small_format, pt(right - 34.0 * s, cy - eh / 2.0), white(0.55), tw + 4.0);
+    }
+
     fn hovered_control(&self) -> Option<Control> {
         self.mouse.and_then(|(x, y)| self.hit(x, y))
     }
@@ -827,8 +1122,68 @@ impl Notch {
         let (dw, dh) = self.text_size(&self.date, &self.date_format);
         self.text(&self.date, &self.date_format, pt(island.right - 16.0 * s - dw, cy - dh / 2.0), white(0.65), dw + 4.0);
 
+        if self.tab == MUSIC_TAB {
+            self.draw_music(island, alpha);
+        }
         for (r, control) in self.controls(island) {
             match control {
+                Control::Player(app) => {
+                    let selected = self.track().is_some_and(|t| t.app == app);
+                    let hot = hovered == Some(Control::Player(app.clone()));
+                    let bg = if selected { 0.16 } else if hot { 0.10 } else { 0.05 };
+                    self.fill_rounded(r, 11.0 * s, white(bg));
+                    let name = self.media.tracks.iter().find(|t| t.app == app).map(|t| t.app_name.clone()).unwrap_or_default();
+                    let (w, h) = self.text_size(&name, &self.small_format);
+                    self.text(
+                        &name,
+                        &self.small_format,
+                        pt((r.left + r.right - w) / 2.0, (r.top + r.bottom - h) / 2.0),
+                        white(if selected { 0.95 } else { 0.6 }),
+                        r.right - r.left,
+                    );
+                }
+                Control::Progress => {
+                    if let Some(track) = self.track() {
+                        let hot = hovered == Some(Control::Progress);
+                        let thickness = if hot { 6.0 } else { 4.0 } * s;
+                        let cy = (r.top + r.bottom) / 2.0;
+                        let bar = rect(r.left, cy - thickness / 2.0, r.right, cy + thickness / 2.0);
+                        self.fill_rounded(bar, thickness / 2.0, white(0.15));
+                        if track.duration_ms > 0 {
+                            let f = track.position_now() as f32 / track.duration_ms as f32;
+                            let fill = rect(bar.left, bar.top, bar.left + (bar.right - bar.left) * f.clamp(0.0, 1.0), bar.bottom);
+                            if fill.right - fill.left > 0.5 {
+                                self.fill_rounded(fill, thickness / 2.0, white(0.9));
+                            }
+                        }
+                    }
+                }
+                Control::Media(button) => {
+                    let hot = hovered == Some(Control::Media(button));
+                    let pressed = self.pressed == Some(Control::Media(button));
+                    let playing = self.track().is_some_and(|t| t.playing);
+                    let (glyph, format) = match button {
+                        MediaButton::Previous => (ICON_PREVIOUS, &self.icon_format),
+                        MediaButton::Next => (ICON_NEXT, &self.icon_format),
+                        MediaButton::PlayPause => (if playing { ICON_PAUSE } else { ICON_PLAY }, &self.play_format),
+                    };
+                    let k = if pressed { 0.92 } else { 1.0 };
+                    let b = rect(
+                        (r.left + r.right) / 2.0 - (r.right - r.left) / 2.0 * k,
+                        (r.top + r.bottom) / 2.0 - (r.bottom - r.top) / 2.0 * k,
+                        (r.left + r.right) / 2.0 + (r.right - r.left) / 2.0 * k,
+                        (r.top + r.bottom) / 2.0 + (r.bottom - r.top) / 2.0 * k,
+                    );
+                    if button == MediaButton::PlayPause {
+                        self.fill_rounded(b, (b.right - b.left) / 2.0, white(if hot { 1.0 } else { 0.92 }));
+                        self.icon(glyph, format, b, with_alpha(ON_ACCENT, alpha));
+                    } else {
+                        if hot {
+                            self.fill_rounded(b, (b.right - b.left) / 2.0, white(0.10));
+                        }
+                        self.icon(glyph, format, b, white(if hot { 1.0 } else { 0.8 }));
+                    }
+                }
                 Control::Tab(i) => {
                     let (glyph, available) = TABS[i];
                     let active = i == self.tab;
@@ -1085,6 +1440,42 @@ impl Notch {
                 audio::toggle_mute();
                 self.output = audio::read();
             }
+            Control::Player(app) => self.player = Some(app),
+            Control::Media(button) => {
+                if let Some(track) = self.track().cloned() {
+                    let command = match button {
+                        MediaButton::Previous => media::Command::Previous,
+                        MediaButton::Next => media::Command::Next,
+                        MediaButton::PlayPause => media::Command::PlayPause,
+                    };
+                    media::command(&track.app, command);
+                    // Show the new state right away; the player confirms shortly.
+                    if button == MediaButton::PlayPause {
+                        if let Some(t) = self.media.tracks.iter_mut().find(|t| t.app == track.app) {
+                            t.position_ms = t.position_now();
+                            t.read_at = Instant::now();
+                            t.playing = !t.playing;
+                        }
+                        self.music.target = if self.playing() { 1.0 } else { 0.0 };
+                        self.update_level();
+                    }
+                }
+            }
+            Control::Progress => {
+                let (island, ..) = self.island();
+                let bar = self.controls(island).into_iter().find(|(_, c)| c == &Control::Progress).map(|(r, _)| r);
+                if let (Some(bar), Some((mx, _)), Some(track)) = (bar, self.mouse, self.track().cloned()) {
+                    if track.duration_ms > 0 {
+                        let f = ((mx - bar.left) / (bar.right - bar.left).max(1.0)).clamp(0.0, 1.0);
+                        let ms = (f * track.duration_ms as f32) as i64;
+                        media::command(&track.app, media::Command::Seek(ms));
+                        if let Some(t) = self.media.tracks.iter_mut().find(|t| t.app == track.app) {
+                            t.position_ms = ms;
+                            t.read_at = Instant::now();
+                        }
+                    }
+                }
+            }
             Control::SliderIcon(_) | Control::Slider(_) => {}
         }
     }
@@ -1107,6 +1498,10 @@ impl Notch {
         notch.output = audio::read();
         notch.internet = network::internet();
         notch.displays = displays::list_now();
+        let playing = std::thread::spawn(media::read_now).join().unwrap_or_default();
+        notch.apply_media(playing);
+        notch.music.value = notch.music.target;
+        notch.bars = [0.55, 0.8, 0.65, 0.4];
         let save = |n: &Notch, name: &str| {
             let path = format!("{dir}\\notch-{name}.png");
             match n.surface.save_png(&path) {
@@ -1127,6 +1522,13 @@ impl Notch {
             step(&mut notch, frames);
             save(&notch, &format!("1-opening-{i}"));
         }
+        save(&notch, "1-closed-music");
+        notch.tab = MUSIC_TAB;
+        notch.open.target = 1.0;
+        step(&mut notch, 50);
+        save(&notch, "2-music");
+        notch.tab = CONTROL_CENTER_TAB;
+        notch.open = Spring::new(0.0);
         notch.open.target = 1.0;
         step(&mut notch, 8);
         save(&notch, "2-opening-panel");
@@ -1156,6 +1558,8 @@ struct Formats {
     small: IDWriteTextFormat,
     icon: IDWriteTextFormat,
     tab_icon: IDWriteTextFormat,
+    track: IDWriteTextFormat,
+    play: IDWriteTextFormat,
 }
 
 impl Formats {
@@ -1193,7 +1597,20 @@ impl Formats {
             small: text(9.5, DWRITE_FONT_WEIGHT_MEDIUM)?,
             icon: icons(14.0)?,
             tab_icon: icons(16.0)?,
+            track: text(13.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
+            play: icons(18.0)?,
         })
+    }
+}
+
+/// 3:07, or 1:02:44 past an hour.
+fn format_time(ms: i64) -> String {
+    let total = (ms.max(0) / 1000) as u64;
+    let (h, m, s) = (total / 3600, total / 60 % 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
     }
 }
 
@@ -1285,6 +1702,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     notch.refresh_controls();
                     notch.render();
                 }
+                TIMER_LEVEL => notch.on_level(),
                 _ => {}
             }
             LRESULT(0)
@@ -1295,6 +1713,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 notch.displays = displays::snapshot();
                 notch.render();
             }
+            LRESULT(0)
+        }
+        WM_MEDIA => {
+            (*ptr).on_media();
             LRESULT(0)
         }
         WM_RADIOS => {

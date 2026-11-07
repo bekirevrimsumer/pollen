@@ -274,7 +274,7 @@ fn is_aumid(s: &str) -> bool {
 }
 
 /// The name Explorer shows for a shell item, e.g. "Microsoft To Do".
-fn shell_display_name(parsing_name: &str) -> Option<String> {
+pub fn shell_display_name(parsing_name: &str) -> Option<String> {
     unsafe {
         let name = wide(parsing_name);
         let item: IShellItem = SHCreateItemFromParsingName(pcwstr(&name), None::<&IBindCtx>).ok()?;

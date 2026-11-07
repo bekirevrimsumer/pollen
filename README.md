@@ -36,7 +36,13 @@ Direct2D. No WebView, no GPU device, no background polling: about 12 MB in Task 
 ### Notch
 
 - An island attached to the top of the primary monitor (Nectar's look and opening)
-- Closed: time and date. Hovered: opens with icon tabs across the top
+- Closed: time and date; while something plays, its art and level bars driven by
+  the output's real peak meter. Hovered: opens with icon tabs across the top, on
+  Music if something plays, else on the Control Center
+- Music: what Windows' media sessions report (Spotify, browsers, players): art,
+  title, artist, player, a progress bar to seek, previous / play-pause / next, and
+  a picker when several players have sessions. Event driven; position-only
+  updates (sent about every second by live streams) get a light read
 - Control Center: network and sound-output tiles (Wi-Fi / Bluetooth tiles when the
   computer has them), shortcut buttons, and sliders for the volume and for each
   monitor's brightness separately over DDC/CI (Nectar changed all monitors at once)
@@ -54,7 +60,7 @@ pollen.exe --restore-taskbar
 
 - Monitors other than the primary
 - Window previews, drag to reorder, settings window
-- The notch's Music, Status and Calendar tabs
+- The notch's Status and Calendar tabs
 
 ## Build
 
