@@ -113,8 +113,10 @@ const OPENING_DROP: f32 = 420.0;
 const LABEL_SPACE: f32 = 40.0;
 const CLOCK_PAD: f32 = 6.0;
 /// Smart and Peek: how long the dock stays after the mouse leaves.
-/// The show-desktop sliver at the right end, like the taskbar's (DIPs).
-const DESKTOP_WIDTH: f32 = 12.0;
+/// The show-desktop button at the right end, like the taskbar's corner (DIPs):
+/// a divider, then a monitor icon.
+const DESKTOP_WIDTH: f32 = 32.0;
+const ICON_DESKTOP: char = '\u{E7F4}';
 const HIDE_DELAY_MS: u32 = 800;
 
 /// Nectar's "Midnight" theme: hsl(#5e8bff's hue, 40%, 10%) = #0f1524.
@@ -473,6 +475,8 @@ pub struct Dock {
     dwrite: IDWriteFactory,
     label_format: IDWriteTextFormat,
     time_format: IDWriteTextFormat,
+    /// Segoe Fluent Icons, for the show-desktop button.
+    glyph_format: IDWriteTextFormat,
     items: Vec<Item>,
     icon_cache: HashMap<String, Option<IconBitmap>>,
     names: HashMap<String, String>,
@@ -596,6 +600,7 @@ impl Dock {
                 brush,
                 label_format: text_format(&dwrite, 12.0, DWRITE_FONT_WEIGHT_NORMAL)?,
                 time_format: text_format(&dwrite, 12.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
+                glyph_format: glyph_format(&dwrite, 14.0)?,
                 dwrite,
                 items: Vec::new(),
                 icon_cache: HashMap::new(),
@@ -837,6 +842,9 @@ impl Dock {
                 ) {
                     self.label_format = label;
                     self.time_format = time;
+                }
+                if let Ok(glyph) = glyph_format(&self.dwrite, 14.0 * scale) {
+                    self.glyph_format = glyph;
                 }
             }
 
@@ -1751,22 +1759,33 @@ impl Dock {
         }
     }
 
-    /// The taskbar's show-desktop sliver: a thin line, lit while hovered.
+    /// Show desktop: a divider after the clock, then a monitor icon that
+    /// lights up like the tray button.
     fn draw_desktop_button(&self, layout: &Layout, content: f32) {
         let s = self.scale;
         let d = layout.desktop;
         let hovered = self.mouse.and_then(|(x, y)| self.hit_test(x, y)) == Some(Hit::Desktop);
         let pressed = self.pressed == Some(Hit::Desktop);
         let cy = layout.icon_bottom - TILE * s / 2.0;
-        if hovered || pressed {
-            let r = rect(d.left + 3.0 * s, cy - 14.0 * s, d.right - 1.0 * s, cy + 14.0 * s);
-            self.fill_rounded(r, 3.0 * s, rgba(1.0, 1.0, 1.0, if pressed { 0.18 } else { 0.10 } * content));
-        }
         unsafe {
-            self.brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.28 * content));
+            self.brush.SetColor(&rgba(1.0, 1.0, 1.0, 0.22 * content));
             let x = d.left + 1.0 * s;
-            let _ = self.surface.rt.DrawLine(pt(x, cy - 10.0 * s), pt(x, cy + 10.0 * s), &self.brush, 1.0 * s, None);
+            let _ = self.surface.rt.DrawLine(pt(x, cy - 9.0 * s), pt(x, cy + 9.0 * s), &self.brush, 1.0 * s, None);
         }
+        // Centered in what is left after the divider.
+        let cx = (d.left + 4.0 * s + d.right) / 2.0;
+        if hovered || pressed {
+            let r = 13.0 * s;
+            self.fill_rounded(
+                rect(cx - r, cy - r, cx + r, cy + r),
+                7.0 * s,
+                rgba(1.0, 1.0, 1.0, if pressed { 0.16 } else { 0.10 } * content),
+            );
+        }
+        let glyph = ICON_DESKTOP.to_string();
+        let (gw, gh) = self.text_size(&glyph, &self.glyph_format);
+        let alpha = if hovered { 1.0 } else { 0.85 };
+        self.draw_text(&glyph, &self.glyph_format, pt(cx - gw / 2.0, cy - gh / 2.0), rgba(1.0, 1.0, 1.0, alpha * content));
     }
 
     fn draw_clock(&self, layout: &Layout, content: f32) {
@@ -2261,6 +2280,20 @@ fn text_format(dwrite: &IDWriteFactory, size: f32, weight: DWRITE_FONT_WEIGHT) -
             w!("Segoe UI Variable Text"),
             None,
             weight,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            w!("tr-tr"),
+        )
+    }
+}
+
+fn glyph_format(dwrite: &IDWriteFactory, size: f32) -> Result<IDWriteTextFormat> {
+    unsafe {
+        dwrite.CreateTextFormat(
+            w!("Segoe Fluent Icons"),
+            None,
+            DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
             size,
