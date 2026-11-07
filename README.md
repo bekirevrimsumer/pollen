@@ -21,6 +21,9 @@ Direct2D. No WebView, no GPU device, no background polling: about 16 MB in Task 
   - **Göz at (Peek):** hidden until the mouse reaches the bottom edge
 - The Windows taskbar pins, in the same order, including Store apps pinned from Start
 - Running apps that are not pinned, after a separator
+- Drag an icon sideways to move it; the others slide out of the way. Pins keep
+  the new order (in `%APPDATA%\Pollen\pin-order.txt`; Windows' own taskbar pins
+  are not changed), running apps keep it until Pollen restarts
 - Windows' own minimize/restore animation flies into and out of the app's dock icon
 - An app's icon rises out of a small bulge in the bar when it opens and melts back in
   when it closes
@@ -75,7 +78,7 @@ pollen.exe --restore-taskbar
 ## Not yet
 
 - Monitors other than the primary
-- Drag to reorder, choosing the weather's city
+- Choosing the weather's city
 
 ## Build
 

@@ -190,6 +190,21 @@ pub fn set(settings: Settings, save: bool) {
     crate::notch::settings_changed();
 }
 
+/// The dock's own order of the pins (their keys), set by dragging. Windows'
+/// taskbar pins are left as they are.
+pub fn pin_order() -> Vec<String> {
+    let Some(dir) = path().and_then(|p| p.parent().map(|d| d.to_path_buf())) else { return Vec::new() };
+    std::fs::read_to_string(dir.join("pin-order.txt"))
+        .map(|text| text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+pub fn save_pin_order(keys: &[String]) {
+    if let Some(dir) = path().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        let _ = std::fs::write(dir.join("pin-order.txt"), keys.join("\n") + "\n");
+    }
+}
+
 pub fn write_file(settings: &Settings) {
     if let Some(p) = path() {
         let _ = std::fs::write(

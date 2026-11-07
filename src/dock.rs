@@ -54,7 +54,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
-use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, ReleaseCapture, SetCapture, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VK_LBUTTON,
+};
 use windows::Win32::UI::Shell::{
     SHAppBarMessage, ABE_BOTTOM, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS, APPBARDATA,
 };
@@ -67,7 +69,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MF_CHECKED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SW_HIDE, SW_MINIMIZE, SW_SHOWNOACTIVATE, TPM_BOTTOMALIGN, TPM_CENTERALIGN, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NULL,
+    WM_CAPTURECHANGED, WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NULL,
     WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
@@ -256,6 +258,9 @@ struct Item {
     pop_at: Option<Instant>,
     /// Nectar's tap: 0.95 while pressed.
     press: Spring,
+    /// Sideways offset (DIPs) that springs back to 0: neighbors making room
+    /// while an icon is dragged, and the dragged icon settling in.
+    shift: Spring,
     /// Closing; removed once it has shrunk away and its slot has closed.
     leaving: bool,
 }
@@ -279,6 +284,7 @@ impl Item {
             pop: Spring::new(start),
             pop_at: appear.then(|| Instant::now() + Duration::from_millis(150)),
             press: Spring::new(1.0),
+            shift: Spring::new(0.0),
             leaving: false,
         }
     }
@@ -329,6 +335,18 @@ struct Layout {
     tray: D2D_RECT_F,
     clock: D2D_RECT_F,
     icon_bottom: f32,
+}
+
+/// An icon held down, and dragged once it has moved far enough.
+struct Drag {
+    key: String,
+    /// Where the press started (window x).
+    start_x: f32,
+    /// The mouse x now.
+    x: f32,
+    /// Where in the icon it was grabbed, as a fraction of its width.
+    grab: f32,
+    active: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -398,6 +416,7 @@ pub struct Dock {
     foreground: HWND,
     /// New items only animate in after the first fill.
     ready: bool,
+    drag: Option<Drag>,
     /// `--snapshot`: never shown, touches neither the taskbar nor the work area,
     /// and paints an opaque backdrop so the PNGs are readable.
     headless: bool,
@@ -492,6 +511,7 @@ impl Dock {
                 last_tick: None,
                 foreground: HWND::default(),
                 ready: false,
+                drag: None,
                 headless,
                 _event_hooks: Vec::new(),
             });
@@ -851,7 +871,14 @@ impl Dock {
 
     fn reload_pins(&mut self) {
         self.pins_signature = apps::pins_signature();
-        let pins = apps::read_pins();
+        let mut pins = apps::read_pins();
+        let order = settings::pin_order();
+        let rank = |launch: &str| {
+            let key = format!("pin:{}", launch.to_lowercase());
+            order.iter().position(|k| *k == key).unwrap_or(usize::MAX)
+        };
+        // Pins the dock has not ordered yet keep Windows' order, after the rest.
+        pins.sort_by_key(|pin| rank(&pin.launch));
         let appear = self.ready;
         let mut old: Vec<Item> = self.items.drain(..).collect();
         let take = |old: &mut Vec<Item>, key: &str| old.iter().position(|i| i.key == key).map(|p| old.remove(p));
@@ -1031,8 +1058,12 @@ impl Dock {
         let content_width = x;
 
         let left = (width - content_width) / 2.0;
-        for slot in &mut slots {
-            slot.x += left;
+        let drag = self.drag.as_ref().filter(|d| d.active);
+        for (slot, item) in slots.iter_mut().zip(&self.items) {
+            slot.x += left + item.shift.value * s;
+            if let Some(d) = drag.filter(|d| d.key == item.key) {
+                slot.x = d.x - d.grab * slot.size;
+            }
         }
         for sep in &mut separators {
             *sep += left;
@@ -1136,6 +1167,8 @@ impl Dock {
             Hit::Item(i) => Some(i),
             Hit::Tray | Hit::Clock => None,
         });
+        let dragging = self.drag.as_ref().is_some_and(|d| d.active);
+        let hovered = if dragging { None } else { hovered };
         if hovered != self.label.map(|(i, _)| i) {
             self.label = hovered.map(|i| (i, Instant::now()));
         }
@@ -1254,6 +1287,7 @@ impl Dock {
             moving |= item.scale.step(dt, 420.0, 36.0);
             moving |= item.pop.step(dt, 400.0, 25.0);
             moving |= item.press.step(dt, 500.0, 38.0);
+            moving |= item.shift.step(dt, 400.0, 35.0);
             // A closing app's slot closes once its icon has shrunk away.
             if item.leaving && item.pop.value < 0.05 {
                 item.presence.target = 0.0;
@@ -1624,11 +1658,117 @@ impl Dock {
             self.lingering = false;
         }
         self.mouse = Some((x, y));
+        self.drag_to(x);
         self.update_visibility();
         self.update_targets();
     }
 
+    // ---- dragging ------------------------------------------------------------
+
+    fn on_down(&mut self, x: f32, y: f32) {
+        self.pressed = self.hit_test(x, y);
+        if let Some(Hit::Item(i)) = self.pressed {
+            if self.items[i].kind == Kind::App {
+                let layout = self.layout(true);
+                let slot = &layout.slots[i];
+                self.drag = Some(Drag {
+                    key: self.items[i].key.clone(),
+                    start_x: x,
+                    x,
+                    grab: ((x - slot.x) / slot.size.max(1.0)).clamp(0.0, 1.0),
+                    active: false,
+                });
+            }
+        }
+        self.start_animation();
+    }
+
+    /// Follows the mouse; returns whether a drag is under way.
+    fn drag_to(&mut self, x: f32) -> bool {
+        let threshold = 6.0 * self.scale;
+        let Some(drag) = &mut self.drag else { return false };
+        drag.x = x;
+        if !drag.active {
+            // A press released outside the dock never reached it.
+            if unsafe { GetKeyState(VK_LBUTTON.0 as i32) } >= 0 {
+                self.drag = None;
+                return false;
+            }
+            if (x - drag.start_x).abs() < threshold {
+                return false;
+            }
+            drag.active = true;
+            self.pressed = None;
+            self.label = None;
+            crate::preview::hide_now();
+            unsafe {
+                SetCapture(self.hwnd);
+            }
+        }
+        self.reorder();
+        true
+    }
+
+    /// Moves the dragged icon past the neighbors its center has crossed, in its
+    /// own group (pins or running apps); they slide over to make room.
+    fn reorder(&mut self) {
+        let Some(key) = self.drag.as_ref().map(|d| d.key.clone()) else { return };
+        let Some(mut i) = self.items.iter().position(|it| it.key == key) else { return };
+        let s = self.scale;
+        let pitch = TILE + GAP;
+        let same_group = |a: &Item, b: &Item| b.kind == Kind::App && !b.leaving && a.pinned == b.pinned;
+        for _ in 0..self.items.len() {
+            let layout = self.layout(false);
+            let center = layout.slots[i].x + layout.slots[i].size / 2.0;
+            let rest_center = |j: usize| layout.slots[j].x - self.items[j].shift.value * s + layout.slots[j].size / 2.0;
+            if i + 1 < self.items.len() && same_group(&self.items[i], &self.items[i + 1]) && center > rest_center(i + 1) {
+                self.items.swap(i, i + 1);
+                self.items[i].shift.value += pitch;
+                i += 1;
+            } else if i > 0 && same_group(&self.items[i], &self.items[i - 1]) && center < rest_center(i - 1) {
+                self.items.swap(i, i - 1);
+                self.items[i].shift.value -= pitch;
+                i -= 1;
+            } else {
+                break;
+            }
+        }
+        self.start_animation();
+    }
+
+    /// Drops the dragged icon into its slot and keeps the new order.
+    fn end_drag(&mut self) -> bool {
+        let Some(drag) = self.drag.take() else { return false };
+        if !drag.active {
+            return false;
+        }
+        unsafe {
+            let _ = ReleaseCapture();
+        }
+        if let Some(i) = self.items.iter().position(|it| it.key == drag.key) {
+            // Settle from where it was drawn.
+            let s = self.scale;
+            let layout = self.layout(false);
+            let size = layout.slots[i].size;
+            let drawn = drag.x - drag.grab * size;
+            self.drag = None;
+            let rest = self.layout(false).slots[i].x - self.items[i].shift.value * s;
+            self.items[i].shift = Spring { value: (drawn - rest) / s, velocity: 0.0, target: 0.0 };
+            if self.items[i].pinned {
+                let order: Vec<String> = self.items.iter().filter(|it| it.pinned && it.kind == Kind::App).map(|it| it.key.clone()).collect();
+                settings::save_pin_order(&order);
+            }
+        }
+        self.pressed = None;
+        self.update_targets();
+        self.start_animation();
+        true
+    }
+
     fn on_mouse_leave(&mut self) {
+        if self.drag.as_ref().is_some_and(|d| d.active) {
+            return;
+        }
         self.mouse = None;
         self.pressed = None;
         if self.settings.dock_mode != DockMode::Fixed {
@@ -1794,6 +1934,33 @@ impl Dock {
         step(&mut dock, 14);
         save(&dock, "6-app-opening");
         step(&mut dock, 40);
+
+        // Dragging the second pin past the next one: it follows the mouse,
+        // the next pin slides over into its place.
+        if let Some(i) = dock.items.iter().position(|it| it.pinned && it.kind == Kind::App).map(|i| i + 1) {
+            let layout = dock.layout(true);
+            let slot = &layout.slots[i];
+            let x = slot.x + slot.size / 2.0;
+            let key = dock.items[i].key.clone();
+            dock.mouse = Some((x, layout.icon_bottom - 10.0));
+            dock.drag = Some(Drag { key, start_x: x, x, grab: 0.5, active: true });
+            let pitch = (TILE + GAP) * dock.scale;
+            for k in 1..=6 {
+                let x = x + pitch * 1.4 * k as f32 / 6.0;
+                dock.mouse = Some((x, layout.icon_bottom - 10.0));
+                dock.drag.as_mut().unwrap().x = x;
+                dock.reorder();
+                dock.update_targets();
+                step(&mut dock, 1);
+            }
+            save(&dock, "8-drag-1");
+            step(&mut dock, 30);
+            save(&dock, "8-drag-2");
+            dock.drag = None;
+            dock.mouse = None;
+            dock.update_targets();
+            step(&mut dock, 40);
+        }
 
         // Fixed mode with a maximized window: solid full width.
         dock.widen.target = 1.0;
@@ -2084,14 +2251,22 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_LBUTTONDOWN => {
             let (x, y) = mouse_point(lparam);
+            (*ptr).on_down(x, y);
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
             let dock = &mut *ptr;
-            dock.pressed = dock.hit_test(x, y);
-            dock.start_animation();
+            if dock.drag.as_ref().is_some_and(|d| d.active) && HWND(lparam.0 as *mut _) != hwnd {
+                dock.end_drag();
+            }
             LRESULT(0)
         }
         WM_LBUTTONUP => {
             let (x, y) = mouse_point(lparam);
             let dock = &mut *ptr;
+            if dock.end_drag() {
+                return LRESULT(0);
+            }
             let hit = dock.hit_test(x, y);
             let pressed = dock.pressed.take();
             if let Some(hit) = hit.filter(|h| Some(*h) == pressed) {
