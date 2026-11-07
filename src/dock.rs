@@ -695,6 +695,7 @@ impl Dock {
             let _ = RegisterShellHookWindow(hwnd);
             crate::appicon::add(hwnd, WM_TRAYICON);
             crate::update::start(hwnd, WM_UPDATE);
+            crate::restyle::apply(None, &settings::get());
             apps::prefetch_start_ids();
             // Window moves, maximize/restore and minimize decide whether the bar
             // widens (Fixed) or hides (Smart).
@@ -817,6 +818,9 @@ impl Dock {
         }
         let new = settings::get();
         let old = std::mem::replace(&mut self.settings, new);
+        if self.is_main() {
+            crate::restyle::apply(Some(&old), &new);
+        }
         if old.dock_size != new.dock_size || old.magnify != new.magnify {
             // Re-measure everything and fetch the icons at the new size.
             self.scale = 0.0;
@@ -2140,6 +2144,7 @@ impl Dock {
     fn shutdown(&mut self) {
         self.remove_appbar();
         if self.is_main() {
+            crate::restyle::undecorate_all();
             taskbar::restore();
         }
     }
@@ -2670,6 +2675,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 dock.schedule_refresh();
             }
             HSHELL_WINDOWCREATED | HSHELL_WINDOWDESTROYED | HSHELL_WINDOWREPLACED | HSHELL_REDRAW => {
+                if wparam.0 & 0xFFFF == HSHELL_WINDOWCREATED {
+                    crate::restyle::decorate(HWND(lparam.0 as *mut _));
+                }
                 broadcast(WM_SYNC_REFRESH, LPARAM(0));
                 dock.schedule_refresh();
             }

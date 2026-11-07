@@ -387,6 +387,8 @@ fn uninstall_flow() {
     stop_running();
     // In case Pollen was not running but left the taskbar hidden.
     crate::taskbar::restore_after_crash();
+    // Windows' own colors, mode and wallpaper, if Pollen had changed them.
+    crate::restyle::restore_all();
     crate::autostart::disable();
     if let Some(lnk) = start_menu_shortcut() {
         let _ = std::fs::remove_file(lnk);

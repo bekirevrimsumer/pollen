@@ -189,7 +189,15 @@ Command line: `Pollen.exe --install` installs or updates without asking,
   theme (Nectar's presets: Midnight, Graphite, Ocean, Forest, Plum, Rose, Ember;
   the light Light, Latte and Mist; or Windows, which follows Windows' accent color
   and its light or dark mode), the background opacity of the
-  dock and the notch, and quitting Pollen. Changes apply at once and are saved
+  dock and the notch, and quitting Pollen.
+- Settings › Apply to Windows carries the theme over to Windows itself, each part on
+  its own: light or dark mode and the accent color; every app window's border (in
+  the accent) and title bar (in the theme's background); window corners (round,
+  slightly round or square); and a wallpaper drawn from the theme's colors. Pollen
+  keeps your own values first (`%APPDATA%\Pollen\windows-original.txt`) and puts them
+  back when a part is turned off or Pollen is uninstalled; window colors last while
+  Pollen runs. Apps that draw their own title bar (Chrome, VS Code, ...) only get
+  the border Changes apply at once and are saved
   in `%APPDATA%\Pollen\settings.txt`
 
 The weather comes from [Open-Meteo](https://open-meteo.com/) for a rough location

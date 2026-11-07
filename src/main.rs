@@ -15,12 +15,14 @@ mod notch;
 mod pacer;
 mod preview;
 mod render;
+mod restyle;
 mod settings;
 mod shell;
 mod taskbar;
 mod tray;
 mod update;
 mod util;
+mod wallpaper;
 
 use windows::core::{w, Result};
 use windows::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
@@ -130,6 +132,16 @@ fn main() -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             return Ok(());
+        }
+        if args.iter().any(|a| a == "--restyle-selftest") {
+            restyle::selftest();
+            return Ok(());
+        }
+        if let Some(i) = args.iter().position(|a| a == "--wallpaper") {
+            // pollen --wallpaper <theme> <file.png>: draws a theme's wallpaper, without setting it.
+            let theme = args.get(i + 1).and_then(|t| settings::Theme::parse(t)).unwrap_or(settings::Theme::Midnight);
+            let path = args.get(i + 2).cloned().unwrap_or_else(|| "wallpaper.png".into());
+            return wallpaper::render(std::path::Path::new(&path), theme.palette());
         }
         if args.iter().any(|a| a == "--notify-watch") {
             // Starts the watcher and prints what it catches for a while.
