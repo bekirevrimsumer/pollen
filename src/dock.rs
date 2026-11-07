@@ -60,7 +60,7 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GetAncestor,
-    GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic, IsZoomed, KillTimer,
+    GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic, IsZoomed, KillTimer, GWL_STYLE, WS_CAPTION, WS_THICKFRAME,
     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterShellHookWindow, RegisterWindowMessageW,
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, GWLP_USERDATA,
@@ -652,6 +652,7 @@ impl Dock {
                 let _ = ShowWindow(self.hwnd, if hide { SW_HIDE } else { SW_SHOWNOACTIVATE });
             }
         }
+        crate::notch::set_hidden_for_fullscreen(hide);
     }
 
     /// Fixed: widen while a window reaches the strip. Smart: hide while a window
@@ -1166,7 +1167,7 @@ impl Dock {
         if !moving {
             self.animating = false;
             self.last_tick = None;
-            pacer::stop();
+            pacer::stop(self.hwnd);
         }
     }
 
@@ -1681,7 +1682,7 @@ impl Dock {
         dock.widen.target = 1.0;
         step(&mut dock, 50);
         save(&dock, "7-full-width");
-        Ok(())
+        crate::notch::Notch::snapshot(dir)
     }
 }
 
@@ -1778,9 +1779,13 @@ fn is_fullscreen(hwnd: HWND, monitor: &RECT) -> bool {
         if matches!(class.as_str(), "Progman" | "WorkerW") {
             return false;
         }
-        // A maximized window spills a few pixels past the monitor when nothing
-        // reserves the bottom strip (Smart, Peek); that is not fullscreen.
-        if IsZoomed(hwnd).as_bool() {
+        // A maximized app window spills a few pixels past the monitor when nothing
+        // reserves the bottom strip (Smart, Peek); that is not fullscreen. Games in
+        // borderless "fullscreen" are maximized too, but have neither a caption
+        // nor a sizing border.
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
+        let framed = style & (WS_CAPTION.0 | WS_THICKFRAME.0) != 0;
+        if IsZoomed(hwnd).as_bool() && framed {
             return false;
         }
         let mut r = RECT::default();
@@ -2010,7 +2015,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         pacer::WM_FRAME => {
-            pacer::frame_done();
+            pacer::frame_done(hwnd);
             (*ptr).tick();
             LRESULT(0)
         }

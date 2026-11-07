@@ -2,8 +2,10 @@
 
 mod anim;
 mod apps;
+mod controls;
 mod dock;
 mod icons;
+mod notch;
 mod pacer;
 mod render;
 mod settings;
@@ -31,6 +33,20 @@ fn main() -> Result<()> {
             apps::print_diagnostics();
             return Ok(());
         }
+        if args.iter().any(|a| a == "--controls") {
+            println!("sound: {:?}", controls::audio::read());
+            println!("internet: {}", controls::network::internet());
+            for d in controls::displays::list_now() {
+                println!("display: {d:?}");
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            controls::network::refresh_radios(move || {
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+            println!("radios: {:?}", controls::network::radios());
+            return Ok(());
+        }
         if let Some(i) = args.iter().position(|a| a == "--snapshot") {
             let dir = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
             return dock::Dock::snapshot(&dir);
@@ -54,6 +70,8 @@ fn main() -> Result<()> {
             default_hook(info);
         }));
 
+        // The notch first, so the dock can tell it about fullscreen windows.
+        let _notch = notch::Notch::create().ok();
         let dock = dock::Dock::create();
         if dock.is_err() {
             taskbar::restore();

@@ -33,6 +33,14 @@ Direct2D. No WebView, no GPU device, no background polling: about 12 MB in Task 
   focus is on another monitor
 - Per-monitor DPI
 
+### Notch
+
+- An island attached to the top of the primary monitor (Nectar's look and opening)
+- Closed: time and date. Hovered: opens with icon tabs across the top
+- Control Center: network and sound-output tiles (Wi-Fi / Bluetooth tiles when the
+  computer has them), shortcut buttons, and sliders for the volume and for each
+  monitor's brightness separately over DDC/CI (Nectar changed all monitors at once)
+
 ## Getting the taskbar back
 
 Quitting Pollen (right-click › Pollen'dan çık) restores the taskbar. If Pollen was
@@ -46,7 +54,7 @@ pollen.exe --restore-taskbar
 
 - Monitors other than the primary
 - Window previews, drag to reorder, settings window
-- The notch
+- The notch's Music, Status and Calendar tabs
 
 ## Build
 
@@ -58,8 +66,10 @@ cargo build --release
 Debug helpers (use a debug build, which has a console):
 
 - `pollen.exe --diag` prints the pins and windows the dock sees.
-- `pollen.exe --snapshot <folder>` renders the dock's animations to PNG files without
-  showing anything on screen.
+- `pollen.exe --snapshot <folder>` renders the dock's and the notch's animations to
+  PNG files without showing anything on screen.
+- `pollen.exe --controls` prints the sound output, network, monitors and their
+  brightness as the Control Center sees them.
 
 ## Credits and license
 
