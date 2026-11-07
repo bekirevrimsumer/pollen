@@ -117,12 +117,13 @@ fn network_octets() -> Option<(u64, u64)> {
 pub fn uptime() -> String {
     let minutes = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() } / 60_000;
     let (days, hours, minutes) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    let (d, h, m) = if crate::i18n::is_turkish() { ("gün", "sa", "dk") } else { ("d", "h", "min") };
     if days > 0 {
-        format!("{days} gün {hours} sa")
+        format!("{days} {d} {hours} {h}")
     } else if hours > 0 {
-        format!("{hours} sa {minutes} dk")
+        format!("{hours} {h} {minutes} {m}")
     } else {
-        format!("{minutes} dk")
+        format!("{minutes} {m}")
     }
 }
 
@@ -141,7 +142,7 @@ pub fn own_memory() -> Option<u64> {
 pub fn format_bytes(bytes: u64) -> String {
     let gb = bytes as f64 / 1024f64.powi(3);
     if gb >= 1.0 {
-        format!("{:.1} GB", gb).replace('.', ",")
+        crate::i18n::decimal(format!("{:.1} GB", gb))
     } else {
         format!("{:.0} MB", bytes as f64 / 1024f64.powi(2))
     }
@@ -151,7 +152,7 @@ pub fn format_bytes(bytes: u64) -> String {
 pub fn format_rate(bytes_per_second: f64) -> String {
     let kb = bytes_per_second / 1024.0;
     if kb >= 1024.0 {
-        format!("{:.1} MB/s", kb / 1024.0).replace('.', ",")
+        crate::i18n::decimal(format!("{:.1} MB/s", kb / 1024.0))
     } else {
         format!("{:.0} KB/s", kb)
     }

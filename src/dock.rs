@@ -30,7 +30,7 @@ use std::f32::consts::PI;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
-use windows::core::{w, Result, PCWSTR};
+use windows::core::{HSTRING, w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
@@ -85,6 +85,7 @@ use crate::icons;
 use crate::pacer;
 use crate::render::Surface;
 use crate::settings::{self, DockMode, Settings};
+use crate::i18n::t;
 use crate::shell;
 use crate::taskbar;
 use crate::tray;
@@ -809,6 +810,11 @@ impl Dock {
             self.apply_mode();
             self.update_visibility();
         }
+        if old.language != new.language {
+            if let Some(start) = self.items.iter_mut().find(|it| it.kind == Kind::Start) {
+                start.name = t("Başlat", "Start").into();
+            }
+        }
         self.update_window_state();
         self.start_animation();
         self.render();
@@ -1040,7 +1046,7 @@ impl Dock {
 
         let mut items = Vec::new();
         items.push(take(&mut old, "start").unwrap_or_else(|| {
-            Item::new(Kind::Start, "start".into(), "Başlat".into(), String::new(), true, false)
+            Item::new(Kind::Start, "start".into(), t("Başlat", "Start").into(), String::new(), true, false)
         }));
         for pin in pins {
             let key = format!("pin:{}", pin.launch.to_lowercase());
@@ -2129,16 +2135,16 @@ impl Dock {
         let mut dock = Self::build(true, None)?;
         let start = dock.items.drain(..).find(|it| it.kind == Kind::Start);
         let apps: [(&str, &str, bool); 10] = [
-            ("Dosya Gezgini", r"C:\Windows\explorer.exe", true),
+            (t("Dosya Gezgini", "File Explorer"), r"C:\Windows\explorer.exe", true),
             ("Microsoft Edge", r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", true),
             ("Terminal", r"shell:AppsFolder\Microsoft.WindowsTerminal_8wekyb3d8bbwe!App", true),
-            ("Not Defteri", r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", false),
-            ("Hesap Makinesi", r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", false),
+            (t("Not Defteri", "Notepad"), r"shell:AppsFolder\Microsoft.WindowsNotepad_8wekyb3d8bbwe!App", false),
+            (t("Hesap Makinesi", "Calculator"), r"shell:AppsFolder\Microsoft.WindowsCalculator_8wekyb3d8bbwe!App", false),
             ("Paint", r"shell:AppsFolder\Microsoft.Paint_8wekyb3d8bbwe!App", false),
-            ("Fotoğraflar", r"shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App", false),
-            ("Medya Oynatıcı", r"shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic", true),
+            (t("Fotoğraflar", "Photos"), r"shell:AppsFolder\Microsoft.Windows.Photos_8wekyb3d8bbwe!App", false),
+            (t("Medya Oynatıcı", "Media Player"), r"shell:AppsFolder\Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic", true),
             ("Microsoft Store", r"shell:AppsFolder\Microsoft.WindowsStore_8wekyb3d8bbwe!App", false),
-            ("Ayarlar", r"shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", false),
+            (t("Ayarlar", "Settings"), r"shell:AppsFolder\windows.immersivecontrolpanel_cw5n1h2txyewy!microsoft.windows.immersivecontrolpanel", false),
         ];
         dock.items.extend(start);
         for (name, source, running) in apps {
@@ -2463,25 +2469,29 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
 
     let Ok(menu) = CreatePopupMenu() else { return };
     if can_open {
-        let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, if running { w!("Yeni pencere") } else { w!("Aç") });
+        let open = if running { t("Yeni pencere", "New window") } else { t("Aç", "Open") };
+        let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, &HSTRING::from(open));
     }
     if running {
-        let _ = AppendMenuW(menu, MF_STRING, CMD_CLOSE, w!("Pencereleri kapat"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_CLOSE, &HSTRING::from(t("Pencereleri kapat", "Close windows")));
     }
     if can_open && pinned {
-        let _ = AppendMenuW(menu, MF_STRING, CMD_UNPIN, w!("Dock'tan kaldır"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_UNPIN, &HSTRING::from(t("Dock'tan kaldır", "Remove from dock")));
     } else if can_open {
-        let _ = AppendMenuW(menu, MF_STRING, CMD_PIN, w!("Dock'a sabitle"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_PIN, &HSTRING::from(t("Dock'a sabitle", "Pin to dock")));
     }
     if can_open || running {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
     }
     let check = |m: DockMode| if mode == m { MF_STRING | MF_CHECKED } else { MF_STRING };
-    let _ = AppendMenuW(menu, check(DockMode::Fixed), CMD_MODE_FIXED, w!("Sabit"));
-    let _ = AppendMenuW(menu, check(DockMode::Smart), CMD_MODE_SMART, w!("Akıllı (pencere gelince gizlen)"));
-    let _ = AppendMenuW(menu, check(DockMode::Peek), CMD_MODE_PEEK, w!("Göz at (kenara gelince göster)"));
+    let fixed = HSTRING::from(t("Sabit", "Fixed"));
+    let smart = HSTRING::from(t("Akıllı (pencere gelince gizlen)", "Smart (hide when a window comes)"));
+    let peek = HSTRING::from(t("Göz at (kenara gelince göster)", "Peek (show at the screen edge)"));
+    let _ = AppendMenuW(menu, check(DockMode::Fixed), CMD_MODE_FIXED, &fixed);
+    let _ = AppendMenuW(menu, check(DockMode::Smart), CMD_MODE_SMART, &smart);
+    let _ = AppendMenuW(menu, check(DockMode::Peek), CMD_MODE_PEEK, &peek);
     let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Pollen'dan çık"));
+    let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, &HSTRING::from(t("Pollen'dan çık", "Quit Pollen")));
 
     let mut cursor = POINT::default();
     let _ = GetCursorPos(&mut cursor);

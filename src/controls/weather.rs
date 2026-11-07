@@ -8,6 +8,8 @@
 //! `%APPDATA%\Pollen\weather-place.txt`.
 
 use std::sync::mpsc::{channel, Sender};
+
+use crate::i18n::t;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -56,17 +58,17 @@ pub struct Day {
 impl Weather {
     pub fn condition(&self) -> &'static str {
         match self.code {
-            0 => "Açık",
-            1 => "Az bulutlu",
-            2 => "Parçalı bulutlu",
-            3 => "Kapalı",
-            45 | 48 => "Sisli",
-            51..=57 => "Çiseliyor",
-            61..=67 => "Yağmurlu",
-            71..=77 => "Karlı",
-            80..=82 => "Sağanak",
-            85 | 86 => "Kar sağanağı",
-            95..=99 => "Gök gürültülü",
+            0 => t("Açık", "Clear"),
+            1 => t("Az bulutlu", "Mostly clear"),
+            2 => t("Parçalı bulutlu", "Partly cloudy"),
+            3 => t("Kapalı", "Overcast"),
+            45 | 48 => t("Sisli", "Fog"),
+            51..=57 => t("Çiseliyor", "Drizzle"),
+            61..=67 => t("Yağmurlu", "Rain"),
+            71..=77 => t("Karlı", "Snow"),
+            80..=82 => t("Sağanak", "Showers"),
+            85 | 86 => t("Kar sağanağı", "Snow showers"),
+            95..=99 => t("Gök gürültülü", "Thunderstorm"),
             _ => "",
         }
     }
@@ -139,7 +141,10 @@ pub fn search(name: &str) -> Vec<Place> {
     if query.is_empty() {
         return Vec::new();
     }
-    let url = format!("https://geocoding-api.open-meteo.com/v1/search?name={query}&count=4&language=tr&format=json");
+    let url = format!(
+        "https://geocoding-api.open-meteo.com/v1/search?name={query}&count=4&language={}&format=json",
+        if crate::i18n::is_turkish() { "tr" } else { "en" }
+    );
     let Some(j) = get_json(&url) else { return Vec::new() };
     let Some(results) = j["results"].as_array() else { return Vec::new() };
     results
@@ -151,7 +156,7 @@ pub fn search(name: &str) -> Vec<Place> {
                 region.push(a);
             }
             if let Some(c) = r["country"].as_str() {
-                region.push(if c == "Türkiye Cumhuriyeti" { "Türkiye" } else { c });
+                region.push(if c == "Türkiye Cumhuriyeti" { "Türkiye" } else if c == "Republic of Türkiye" { "Türkiye" } else { c });
             }
             Some(Place {
                 region: region.join(", "),

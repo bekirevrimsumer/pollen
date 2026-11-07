@@ -6,7 +6,8 @@ A lightweight native dock and notch for Windows that replace the taskbar, writte
 Rust with Direct2D. No WebView, no GPU device, no background polling: about 15 MB in
 Task Manager, one 1 MB program.
 
-> Early stage. Windows 10/11, x64. The interface is in Turkish.
+> Early stage. Windows 10/11, x64. In English and Turkish (it follows Windows' language,
+> or pick one in Settings).
 
 ![Pollen: the dock below, the notch open on Music above](docs/screenshots/desktop.png)
 
@@ -16,16 +17,16 @@ Task Manager, one 1 MB program.
     <td><img src="docs/screenshots/notch-weather.png" alt="Weather"></td>
   </tr>
   <tr>
-    <td align="center">Kontrol merkezi: Wi-Fi, ses, her monitörün parlaklığı ayrı</td>
-    <td align="center">Hava durumu: şimdi, sonraki saatler ve günler</td>
+    <td align="center">Control Center: Wi-Fi, sound, each monitor's brightness on its own</td>
+    <td align="center">Weather: now, the next hours and days</td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/notch-status.png" alt="Status"></td>
     <td><img src="docs/screenshots/notch-settings.png" alt="Settings"></td>
   </tr>
   <tr>
-    <td align="center">Durum: işlemci, bellek, disk, ağ</td>
-    <td align="center">Ayarlar: dock modu, boyut, tema, konum</td>
+    <td align="center">Status: CPU, memory, disk, network</td>
+    <td align="center">Settings: dock mode, size, language, theme, place</td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/notch-calendar.png" alt="Calendar"></td>
@@ -35,18 +36,18 @@ Task Manager, one 1 MB program.
     </td>
   </tr>
   <tr>
-    <td align="center">Takvim</td>
-    <td align="center">Kapalıyken: çalan müzik, ses göstergesi</td>
+    <td align="center">Calendar</td>
+    <td align="center">Closed: what is playing, the volume indicator</td>
   </tr>
 </table>
 
 The screenshots are rendered by Pollen itself with made-up data
-(`Pollen.exe --demo-shots <folder>`, then `python docs/make_screenshots.py <folder>`).
+(`Pollen.exe --demo-shots <folder> --english`, then `python docs/make_screenshots.py <folder>`).
 
 ## Install
 
 1. Download `Pollen.exe` from the [latest release](../../releases/latest).
-2. Run it and choose **Kur** (install). Pollen installs for your user only, with no
+2. Run it and choose **Install**. Pollen installs for your user only, with no
    admin rights: into `%LOCALAPPDATA%\Programs\Pollen`, with a Start menu shortcut.
 3. To remove it: Settings › Apps › Installed apps › Pollen › Uninstall.
 
@@ -124,7 +125,8 @@ Command line: `Pollen.exe --install` installs or updates without asking,
   a moment to show the level (Windows' own indicator still shows too)
 - Calendar: a plain month view (Monday first), today highlighted, previous / next
   month. No accounts or calendar sync
-- Settings: the dock's mode, size and magnification, starting with Windows (off
+- Settings: the language (Auto follows Windows; Türkçe or English), the dock's mode,
+  size and magnification, starting with Windows (off
   until turned on; a value under the user's `Run` key), the weather's place, the
   theme (Nectar's dark presets: Gece/Midnight, Grafit, Okyanus, Orman, Erik, Gül,
   Kor, or one that follows Windows' accent color), the background opacity of the
@@ -138,7 +140,7 @@ with Open-Meteo's geocoding) replaces the IP lookup; "Otomatik" goes back to it.
 
 ## Getting the taskbar back
 
-Quitting Pollen (right-click › Pollen'dan çık) restores the taskbar. If Pollen was
+Quitting Pollen (right-click › Quit Pollen, or the tray icon's menu) restores the taskbar. If Pollen was
 killed or crashed, starting it again restores it first, or run:
 
 ```powershell

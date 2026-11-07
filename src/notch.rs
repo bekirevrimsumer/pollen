@@ -60,6 +60,7 @@ use crate::controls::{audio, displays, media, network, privacy, system, weather}
 use crate::pacer;
 use crate::render::Surface;
 use crate::settings::{self, DockMode, DockSize, Magnify, Settings};
+use crate::i18n::{self, t};
 use crate::shell;
 
 // Sizes in DIPs (Nectar's CSS pixels), multiplied by the monitor scale.
@@ -168,6 +169,7 @@ const ICON_COLOR: char = '\u{E790}';
 const ICON_POWER: char = '\u{E7E8}';
 const ICON_PLACE: char = '\u{E81D}';
 const ICON_THEME: char = '\u{E771}';
+const ICON_LANGUAGE: char = '\u{E774}';
 const ICON_CLOCK: char = '\u{E823}';
 const ICON_INFO: char = '\u{E946}';
 // Segoe Fluent Icons has no rain or snow; DirectWrite falls back to Segoe UI Symbol.
@@ -177,9 +179,6 @@ const ICON_SNOW: char = '\u{2744}';
 /// A place search result's row.
 const RESULT_HEIGHT: f32 = 28.0;
 
-const MONTHS: [&str; 12] =
-    ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
-const WEEKDAYS: [&str; 7] = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
 
 static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -255,11 +254,11 @@ impl Button {
 
     fn label(self) -> &'static str {
         match self {
-            Button::Notifications => "Bildirimler ve Rahatsız Etme",
-            Button::Sound => "Ses ayarları",
-            Button::Display => "Ekran ayarları",
-            Button::Network => "Ağ ayarları",
-            Button::Settings => "Windows Ayarları",
+            Button::Notifications => t("Bildirimler ve Rahatsız Etme", "Notifications and Do not disturb"),
+            Button::Sound => t("Ses ayarları", "Sound settings"),
+            Button::Display => t("Ekran ayarları", "Display settings"),
+            Button::Network => t("Ağ ayarları", "Network settings"),
+            Button::Settings => t("Windows Ayarları", "Windows Settings"),
         }
     }
 }
@@ -282,10 +281,11 @@ enum Choice {
     Size,
     Magnify,
     Autostart,
+    Language,
 }
 
 impl Choice {
-    const ALL: [Choice; 4] = [Choice::Mode, Choice::Size, Choice::Magnify, Choice::Autostart];
+    const ALL: [Choice; 5] = [Choice::Mode, Choice::Size, Choice::Magnify, Choice::Autostart, Choice::Language];
 
     fn icon(self) -> char {
         match self {
@@ -293,15 +293,17 @@ impl Choice {
             Choice::Size => ICON_SIZE,
             Choice::Magnify => ICON_ZOOM,
             Choice::Autostart => ICON_POWER,
+            Choice::Language => ICON_LANGUAGE,
         }
     }
 
     fn title(self) -> &'static str {
         match self {
-            Choice::Mode => "Dock modu",
-            Choice::Size => "Dock boyutu",
-            Choice::Magnify => "Büyütme",
-            Choice::Autostart => "Windows ile aç",
+            Choice::Mode => t("Dock modu", "Dock mode"),
+            Choice::Size => t("Dock boyutu", "Dock size"),
+            Choice::Magnify => t("Büyütme", "Magnify"),
+            Choice::Autostart => t("Windows ile aç", "Autostart"),
+            Choice::Language => t("Dil", "Language"),
         }
     }
 
@@ -310,7 +312,8 @@ impl Choice {
             Choice::Mode => DockMode::ALL.map(|m| m.label()).to_vec(),
             Choice::Size => DockSize::ALL.map(|m| m.label()).to_vec(),
             Choice::Magnify => Magnify::ALL.map(|m| m.label()).to_vec(),
-            Choice::Autostart => vec!["Kapalı", "Açık"],
+            Choice::Autostart => vec![t("Kapalı", "Off"), t("Açık", "On")],
+            Choice::Language => settings::Language::ALL.map(|l| l.label()).to_vec(),
         }
     }
 
@@ -321,6 +324,7 @@ impl Choice {
             Choice::Size => DockSize::ALL.iter().position(|m| *m == s.dock_size),
             Choice::Magnify => Magnify::ALL.iter().position(|m| *m == s.magnify),
             Choice::Autostart => Some(autostart as usize),
+            Choice::Language => settings::Language::ALL.iter().position(|l| *l == s.language),
         }
         .unwrap_or(0)
     }
@@ -331,6 +335,7 @@ impl Choice {
             Choice::Size => s.dock_size = DockSize::ALL[i],
             Choice::Magnify => s.magnify = Magnify::ALL[i],
             Choice::Autostart => {}
+            Choice::Language => s.language = settings::Language::ALL[i],
         }
     }
 }
@@ -682,17 +687,10 @@ impl Notch {
     // ---- data --------------------------------------------------------------
 
     fn update_clock(&mut self) {
-        const DAYS: [&str; 7] = ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"];
-        const MONTHS: [&str; 12] = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
         let t = unsafe { GetLocalTime() };
         self.today = (t.wYear as i32, t.wMonth as u32, t.wDay as u32);
         self.time = format!("{:02}:{:02}", t.wHour, t.wMinute);
-        self.date = format!(
-            "{} {} {}",
-            DAYS[t.wDayOfWeek as usize % 7],
-            t.wDay,
-            MONTHS[(t.wMonth as usize).saturating_sub(1) % 12]
-        );
+        self.date = i18n::short_date(t.wDayOfWeek as usize, t.wDay as u32, t.wMonth as u32);
         let wait = (60 - t.wSecond as u32) * 1000 - t.wMilliseconds as u32 + 50;
         unsafe { SetTimer(Some(self.hwnd), TIMER_CLOCK, wait, None) };
     }
@@ -977,7 +975,7 @@ impl Notch {
         let glyph = if level <= 0.0 { ICON_MUTE } else { ICON_VOLUME };
         let x = island.left + 16.0 * s;
         self.icon(glyph, &self.icon_format, rect(x, cy - 9.0 * s, x + 18.0 * s, cy + 9.0 * s), white(0.95));
-        let text = format!("%{}", (level * 100.0).round() as u32);
+        let text = i18n::percent(level);
         let (tw, th) = self.text_size(&text, &self.date_format);
         let right = island.right - 16.0 * s;
         self.text(&text, &self.date_format, pt(right - tw, cy - th / 2.0), white(0.8), tw + 4.0);
@@ -1596,31 +1594,36 @@ impl Notch {
         let st = &self.stats;
         let ratio = |used: u64, total: u64| if total > 0 { used as f32 / total as f32 } else { 0.0 };
         let cards = [
-            (ICON_CPU, "İşlemci".to_string(), format!("%{:.0}", st.cpu * 100.0), Some(st.cpu)),
+            (ICON_CPU, t("İşlemci", "CPU").to_string(), i18n::percent(st.cpu), Some(st.cpu)),
             (
                 ICON_MEMORY,
-                "Bellek".to_string(),
+                t("Bellek", "Memory").to_string(),
                 format!("{} / {}", system::format_bytes(st.memory_used), system::format_bytes(st.memory_total)),
                 Some(ratio(st.memory_used, st.memory_total)),
             ),
             (
                 ICON_DISK,
                 "Disk (C:)".to_string(),
-                format!("{} boş", system::format_bytes(st.disk_total.saturating_sub(st.disk_used))),
+                format!("{} {}", system::format_bytes(st.disk_total.saturating_sub(st.disk_used)), t("boş", "free")),
                 Some(ratio(st.disk_used, st.disk_total)),
             ),
             (
                 ICON_DOWN,
-                "Ağ".to_string(),
+                t("Ağ", "Network").to_string(),
                 format!("↓ {}   ↑ {}", system::format_rate(st.down), system::format_rate(st.up)),
                 None,
             ),
-            (ICON_CLOCK, "Açık kalma".to_string(), if crate::util::demo() { "2 sa 14 dk".into() } else { system::uptime() }, None),
+            (
+                ICON_CLOCK,
+                t("Açık kalma", "Uptime").to_string(),
+                if crate::util::demo() { t("2 sa 14 dk", "2 h 14 min").into() } else { system::uptime() },
+                None,
+            ),
             (
                 ICON_INFO,
                 "Pollen".to_string(),
                 if crate::util::demo() {
-                    "15,1 MB".into()
+                    i18n::decimal("15.1 MB".into())
                 } else {
                     system::own_memory().map(system::format_bytes).unwrap_or_default()
                 },
@@ -1665,7 +1668,7 @@ impl Notch {
         let y = island.top + BAR * s + PAD * 0.7 * s;
         let card = rect(left, y, right, y + 64.0 * s);
         let Some(w) = &self.weather else {
-            let text = "Hava durumu alınıyor…";
+            let text = t("Hava durumu alınıyor…", "Getting the weather…");
             let (tw, th) = self.text_size(text, &self.title_format);
             self.text(text, &self.title_format, pt((left + right - tw) / 2.0, (card.top + card.bottom - th) / 2.0), white(0.5), tw + 4.0);
             return;
@@ -1724,9 +1727,9 @@ impl Notch {
         for (i, d) in w.days.iter().enumerate() {
             let cy = card.top + 6.0 * s + (i as f32 + 0.5) * DAY_ROW * s;
             let name = if i == 0 {
-                "Yarın".to_string()
+                t("Yarın", "Tomorrow").to_string()
             } else {
-                WEEKDAYS[weekday_monday0(d.date.0, d.date.1, d.date.2) as usize].to_string()
+                i18n::weekdays()[weekday_monday0(d.date.0, d.date.1, d.date.2) as usize].to_string()
             };
             let (_, nh) = self.text_size(&name, &self.title_format);
             self.text(&name, &self.title_format, pt(card.left + 14.0 * s, cy - nh / 2.0), white(0.9), 70.0 * s);
@@ -1766,12 +1769,13 @@ impl Notch {
         }
         let cy = y + CHOICE_HEIGHT * s / 2.0;
         self.icon(ICON_PLACE, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), white(0.8));
-        let (_, th) = self.text_size("Hava konumu", &self.title_format);
-        self.text("Hava konumu", &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
+        let place_title = t("Hava konumu", "Weather place");
+        let (_, th) = self.text_size(place_title, &self.title_format);
+        self.text(place_title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
         y += (CHOICE_HEIGHT + 6.0) * s;
         if let Some(edit) = &self.city_edit {
             if edit.results.is_empty() && !edit.text.trim().is_empty() {
-                let status = if edit.searching { "Aranıyor…" } else { "Bulunamadı" };
+                let status = if edit.searching { t("Aranıyor…", "Searching…") } else { t("Bulunamadı", "Nothing found") };
                 let (_, sh) = self.text_size(status, &self.small_format);
                 let x = left + LABEL_WIDTH * s + 12.0 * s;
                 self.text(status, &self.small_format, pt(x, y + (RESULT_HEIGHT * s - sh) / 2.0), white(0.5), 200.0 * s);
@@ -1780,12 +1784,15 @@ impl Notch {
         y += (self.city_list_height() + 4.0) * s;
         let cy = y + CHOICE_HEIGHT * s / 2.0;
         self.icon(ICON_THEME, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), white(0.8));
-        let title = format!("Tema · {}", self.settings.theme.label());
+        // With the theme's name when it fits.
+        let room = LABEL_WIDTH * s - 30.0 * s;
+        let named = format!("{} · {}", t("Tema", "Theme"), self.settings.theme.label());
+        let title = if self.text_size(&named, &self.title_format).0 <= room { named } else { t("Tema", "Theme").to_string() };
         let (_, th) = self.text_size(&title, &self.title_format);
         self.text(&title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
         y += (CHOICE_HEIGHT + 10.0) * s;
         y += (SLIDER_HEIGHT + 16.0) * s;
-        let note = format!("Pollen {} · ayarlar kendiliğinden kaydedilir", crate::install::VERSION);
+        let note = format!("Pollen {} · {}", crate::install::VERSION, t("ayarlar kendiliğinden kaydedilir", "settings save themselves"));
         let note = note.as_str();
         let (_, nh) = self.text_size(note, &self.small_format);
         self.text(note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), white(0.4), 245.0 * s);
@@ -1812,7 +1819,7 @@ impl Notch {
             }
             self.icon(glyph, &self.icon_format, r, white(if hot { 1.0 } else { 0.7 }));
         }
-        let title = format!("{} {}", MONTHS[(month - 1) as usize], year);
+        let title = format!("{} {}", i18n::months()[(month - 1) as usize], year);
         let (tw, th) = self.text_size(&title, &self.track_format);
         let current = (year, month) == (self.today.0, self.today.1);
         let title_alpha = if hovered == Some(Control::CalendarTitle) && !current { 1.0 } else { 0.95 };
@@ -1820,7 +1827,7 @@ impl Notch {
         y += 34.0 * s;
 
         let cell = (right - left) / 7.0;
-        for (i, day) in WEEKDAYS.iter().enumerate() {
+        for (i, day) in i18n::weekdays().iter().enumerate() {
             let (w, h) = self.text_size(day, &self.small_format);
             let x = left + i as f32 * cell + (cell - w) / 2.0;
             self.text(day, &self.small_format, pt(x, y + (18.0 * s - h) / 2.0), white(if i >= 5 { 0.4 } else { 0.55 }), w + 4.0);
@@ -1903,7 +1910,7 @@ impl Notch {
             y += 30.0 * s;
         }
         let Some(track) = self.track() else {
-            let text = "Şu an çalan bir şey yok";
+            let text = t("Şu an çalan bir şey yok", "Nothing is playing");
             let (w, h) = self.text_size(text, &self.title_format);
             let cy = island.top + BAR * s + 64.0 * s / 2.0;
             self.text(text, &self.title_format, pt((left + right - w) / 2.0, cy - h / 2.0), white(0.55), w + 4.0);
@@ -2082,9 +2089,9 @@ impl Notch {
                     let hot = hovered == Some(Control::SliderIcon(slider.clone())) && matches!(slider, Slider::Volume | Slider::App);
                     self.icon(glyph, &self.icon_format, r, white(if hot { 1.0 } else { 0.8 }));
                     let name = match &slider {
-                        Slider::Volume => "Ses".to_string(),
+                        Slider::Volume => t("Ses", "Volume").to_string(),
                         Slider::App => self.track().map(|t| t.app_name.clone()).unwrap_or_default(),
-                        Slider::Opacity => "Opaklık".to_string(),
+                        Slider::Opacity => t("Opaklık", "Opacity").to_string(),
                         Slider::Brightness(device) => {
                             self.displays.iter().find(|d| &d.device == device).map(|d| d.name.clone()).unwrap_or_default()
                         }
@@ -2164,8 +2171,9 @@ impl Notch {
                         Some(edit) => {
                             let (tw, th) = self.text_size(&edit.text, &self.title_format);
                             if edit.text.is_empty() {
-                                let (_, ph) = self.text_size("Şehir ara…", &self.title_format);
-                                self.text("Şehir ara…", &self.title_format, pt(x + 3.0 * s, cy - ph / 2.0), white(0.4), r.right - x);
+                                let hint = t("Şehir ara…", "Search for a city…");
+                                let (_, ph) = self.text_size(hint, &self.title_format);
+                                self.text(hint, &self.title_format, pt(x + 3.0 * s, cy - ph / 2.0), white(0.4), r.right - x);
                             } else {
                                 self.text(&edit.text, &self.title_format, pt(x, cy - th / 2.0), white(0.95), r.right - x - 8.0 * s);
                             }
@@ -2175,8 +2183,8 @@ impl Notch {
                         None => {
                             let label = match (&self.place, &self.weather) {
                                 (Some(p), _) => p.name.clone(),
-                                (None, Some(w)) if !w.city.is_empty() => format!("{} (otomatik)", w.city),
-                                _ => "Otomatik".to_string(),
+                                (None, Some(w)) if !w.city.is_empty() => format!("{} ({})", w.city, t("otomatik", "automatic")),
+                                _ => t("Otomatik", "Automatic").to_string(),
                             };
                             let limit = if self.place.is_some() { r.right - 84.0 * s - x } else { r.right - 12.0 * s - x };
                             let (_, th) = self.text_size(&label, &self.title_format);
@@ -2187,9 +2195,10 @@ impl Notch {
                 Control::CityAuto => {
                     let hot = hovered == Some(Control::CityAuto);
                     self.fill_rounded(r, (r.bottom - r.top) / 2.0, white(if hot { 0.18 } else { 0.09 }));
-                    let (lw, lh) = self.text_size("Otomatik", &self.small_format);
+                    let auto = t("Otomatik", "Automatic");
+                    let (lw, lh) = self.text_size(auto, &self.small_format);
                     self.text(
-                        "Otomatik",
+                        auto,
                         &self.small_format,
                         pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0),
                         white(if hot { 1.0 } else { 0.75 }),
@@ -2216,7 +2225,7 @@ impl Notch {
                     let pressed = self.pressed == Some(Control::Quit);
                     let bg = if pressed { 0.16 } else if hot { 0.11 } else { 0.06 };
                     self.fill_rounded(r, 15.0 * s, white(bg));
-                    let label = "Pollen'dan çık";
+                    let label = t("Pollen'dan çık", "Quit Pollen");
                     let (lw, lh) = self.text_size(label, &self.title_format);
                     let iw = 16.0 * s;
                     let x = (r.left + r.right - iw - 6.0 * s - lw) / 2.0;
@@ -2252,23 +2261,23 @@ impl Notch {
     /// accent while on.
     fn draw_tile(&self, r: D2D_RECT_F, tile: Tile, hot: bool, alpha: f32) {
         let s = self.scale;
-        let output_name = self.output.as_ref().map(|o| o.name.clone()).unwrap_or_else(|| "Yok".into());
+        let output_name = self.output.as_ref().map(|o| o.name.clone()).unwrap_or_else(|| t("Yok", "None").into());
         let (icon, title, status, on) = match tile {
             Tile::Wifi => {
                 let on = self.radios.wifi == Some(true);
-                (ICON_WIFI, "Wi-Fi".to_string(), if on { "Açık" } else { "Kapalı" }.to_string(), on)
+                (ICON_WIFI, "Wi-Fi".to_string(), if on { t("Açık", "On") } else { t("Kapalı", "Off") }.to_string(), on)
             }
             Tile::Bluetooth => {
                 let on = self.radios.bluetooth == Some(true);
-                (ICON_BLUETOOTH, "Bluetooth".to_string(), if on { "Açık" } else { "Kapalı" }.to_string(), on)
+                (ICON_BLUETOOTH, "Bluetooth".to_string(), if on { t("Açık", "On") } else { t("Kapalı", "Off") }.to_string(), on)
             }
             Tile::Network => (
                 ICON_ETHERNET,
-                "Ağ".to_string(),
-                if self.internet { "İnternete bağlı" } else { "Bağlantı yok" }.to_string(),
+                t("Ağ", "Network").to_string(),
+                if self.internet { t("İnternete bağlı", "Connected") } else { t("Bağlantı yok", "No internet") }.to_string(),
                 self.internet,
             ),
-            Tile::Output => (ICON_VOLUME, "Ses çıkışı".to_string(), output_name, false),
+            Tile::Output => (ICON_VOLUME, t("Ses çıkışı", "Sound output").to_string(), output_name, false),
         };
         let pressed = self.pressed == Some(Control::Tile(tile));
         let lift = if hot && !pressed { 0.5 * s } else { 0.0 };
@@ -2312,7 +2321,7 @@ impl Notch {
                 if fill.right - fill.left > 0.5 {
                     self.fill_rounded(fill, thickness / 2.0, rgba(1.0, 1.0, 1.0, 0.9 * alpha));
                 }
-                let text = format!("{}%", (v * 100.0).round() as u32);
+                let text = i18n::percent(v);
                 let (tw, th) = self.text_size(&text, &self.small_format);
                 self.text(
                     &text,
@@ -2664,18 +2673,18 @@ impl Notch {
     pub fn demo_shots(dir: &str) -> Result<()> {
         let mut n = Self::build(true)?;
         n.time = "09:41".into();
-        n.output = Some(audio::Output { name: "Hoparlör".into(), volume: 0.45, muted: false });
+        n.output = Some(audio::Output { name: t("Hoparlör", "Speakers").into(), volume: 0.45, muted: false });
         n.internet = true;
         n.radios = network::Radios { wifi: Some(true), bluetooth: Some(false) };
         n.displays = vec![
-            displays::Display { name: "Monitör 1".into(), device: r"\\.\DISPLAY1".into(), left: 0, brightness: Some(70) },
-            displays::Display { name: "Monitör 2".into(), device: r"\\.\DISPLAY2".into(), left: 1920, brightness: Some(45) },
+            displays::Display { name: t("Monitör 1", "Monitor 1").into(), device: r"\\.\DISPLAY1".into(), left: 0, brightness: Some(70) },
+            displays::Display { name: t("Monitör 2", "Monitor 2").into(), device: r"\\.\DISPLAY2".into(), left: 1920, brightness: Some(45) },
         ];
         let track = media::Track {
             app: "demo".into(),
-            app_name: "Medya Oynatıcı".into(),
-            title: "Gün Işığı".into(),
-            artist: "Polen Dörtlüsü".into(),
+            app_name: t("Medya Oynatıcı", "Media Player").into(),
+            title: t("Gün Işığı", "Sunlight").into(),
+            artist: t("Polen Dörtlüsü", "The Pollen Quartet").into(),
             playing: true,
             position_ms: 83_000,
             read_at: Instant::now(),
@@ -2691,7 +2700,7 @@ impl Notch {
         let day = |d, high, low, code| weather::Day { date: (n.today.0, n.today.1, d), high, low, code };
         let next = |k: u32| ((n.today.2 + k - 1) % 28) + 1;
         n.weather = Some(weather::Weather {
-            city: "İstanbul".into(),
+            city: t("İstanbul", "Istanbul").into(),
             temperature: 18.0,
             high: 21.0,
             low: 13.0,

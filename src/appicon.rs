@@ -2,7 +2,7 @@
 //! Settings tab, right click a small menu. The icon (a little flower) is drawn
 //! here, so the program needs no image files.
 
-use windows::core::{w, PCWSTR};
+use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::Graphics::Gdi::{CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
 use windows::Win32::UI::Shell::{
@@ -55,11 +55,12 @@ pub fn remove(owner: HWND) {
 pub fn menu(owner: HWND, autostart: bool) -> usize {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return 0 };
-        let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, w!("Ayarlar"));
+        let text = |tr: &'static str, en: &'static str| windows::core::HSTRING::from(crate::i18n::t(tr, en));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, &text("Ayarlar", "Settings"));
         let check = if autostart { MF_STRING | MF_CHECKED } else { MF_STRING };
-        let _ = AppendMenuW(menu, check, CMD_AUTOSTART, w!("Windows ile başlat"));
+        let _ = AppendMenuW(menu, check, CMD_AUTOSTART, &text("Windows ile başlat", "Start with Windows"));
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, w!("Pollen'dan çık"));
+        let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, &text("Pollen'dan çık", "Quit Pollen"));
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         let _ = SetForegroundWindow(owner);

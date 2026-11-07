@@ -6,6 +6,7 @@ mod autostart;
 mod apps;
 mod controls;
 mod dock;
+mod i18n;
 mod icons;
 mod install;
 mod notch;
@@ -91,6 +92,11 @@ fn main() -> Result<()> {
             let dir = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
             util::set_demo();
             settings::use_defaults();
+            if args.iter().any(|a| a == "--english") {
+                let mut s = settings::get();
+                s.language = settings::Language::English;
+                settings::set(s, false);
+            }
             dock::Dock::demo_shots(&dir)?;
             return notch::Notch::demo_shots(&dir);
         }

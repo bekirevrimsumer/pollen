@@ -30,9 +30,9 @@ impl DockMode {
 
     pub fn label(self) -> &'static str {
         match self {
-            DockMode::Fixed => "Sabit",
-            DockMode::Smart => "Akıllı",
-            DockMode::Peek => "Göz at",
+            DockMode::Fixed => crate::i18n::t("Sabit", "Fixed"),
+            DockMode::Smart => crate::i18n::t("Akıllı", "Smart"),
+            DockMode::Peek => crate::i18n::t("Göz at", "Peek"),
         }
     }
 
@@ -62,9 +62,9 @@ impl DockSize {
 
     pub fn label(self) -> &'static str {
         match self {
-            DockSize::Small => "Küçük",
-            DockSize::Medium => "Orta",
-            DockSize::Large => "Büyük",
+            DockSize::Small => crate::i18n::t("Küçük", "Small"),
+            DockSize::Medium => crate::i18n::t("Orta", "Medium"),
+            DockSize::Large => crate::i18n::t("Büyük", "Large"),
         }
     }
 
@@ -103,9 +103,9 @@ impl Magnify {
 
     pub fn label(self) -> &'static str {
         match self {
-            Magnify::Off => "Yok",
-            Magnify::Low => "Az",
-            Magnify::High => "Çok",
+            Magnify::Off => crate::i18n::t("Yok", "Off"),
+            Magnify::Low => crate::i18n::t("Az", "Low"),
+            Magnify::High => crate::i18n::t("Çok", "High"),
         }
     }
 
@@ -120,6 +120,40 @@ impl Magnify {
 
     fn parse(s: &str) -> Option<Magnify> {
         Magnify::ALL.into_iter().find(|m| m.key() == s.trim())
+    }
+}
+
+/// The interface language.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Language {
+    /// Windows' display language: Turkish there, English otherwise.
+    Auto,
+    Turkish,
+    English,
+}
+
+impl Language {
+    pub const ALL: [Language; 3] = [Language::Auto, Language::Turkish, Language::English];
+
+    fn key(self) -> &'static str {
+        match self {
+            Language::Auto => "auto",
+            Language::Turkish => "tr",
+            Language::English => "en",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Language::Auto => crate::i18n::t("Otomatik", "Auto"),
+            // Each language by its own name.
+            Language::Turkish => "Türkçe",
+            Language::English => "English",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Language> {
+        Language::ALL.into_iter().find(|l| l.key() == s.trim())
     }
 }
 
@@ -165,13 +199,13 @@ impl Theme {
 
     pub fn label(self) -> &'static str {
         match self {
-            Theme::Midnight => "Gece",
-            Theme::Graphite => "Grafit",
-            Theme::Ocean => "Okyanus",
-            Theme::Forest => "Orman",
-            Theme::Plum => "Erik",
-            Theme::Rose => "Gül",
-            Theme::Ember => "Kor",
+            Theme::Midnight => crate::i18n::t("Gece", "Midnight"),
+            Theme::Graphite => crate::i18n::t("Grafit", "Graphite"),
+            Theme::Ocean => crate::i18n::t("Okyanus", "Ocean"),
+            Theme::Forest => crate::i18n::t("Orman", "Forest"),
+            Theme::Plum => crate::i18n::t("Erik", "Plum"),
+            Theme::Rose => crate::i18n::t("Gül", "Rose"),
+            Theme::Ember => crate::i18n::t("Kor", "Ember"),
             Theme::Windows => "Windows",
         }
     }
@@ -313,6 +347,7 @@ pub struct Settings {
     /// The dock's and the notch's background, MIN_OPACITY..=1.
     pub opacity: f32,
     pub theme: Theme,
+    pub language: Language,
 }
 
 impl Default for Settings {
@@ -323,6 +358,7 @@ impl Default for Settings {
             magnify: Magnify::Low,
             opacity: 0.9,
             theme: Theme::Midnight,
+            language: Language::Auto,
         }
     }
 }
@@ -345,6 +381,7 @@ fn read_file() -> Settings {
             "dock-size" => settings.dock_size = DockSize::parse(value).unwrap_or(settings.dock_size),
             "magnify" => settings.magnify = Magnify::parse(value).unwrap_or(settings.magnify),
             "theme" => settings.theme = Theme::parse(value).unwrap_or(settings.theme),
+            "language" => settings.language = Language::parse(value).unwrap_or(settings.language),
             "opacity" => {
                 if let Ok(v) = value.trim().parse::<f32>() {
                     settings.opacity = (v / 100.0).clamp(MIN_OPACITY, 1.0);
@@ -433,12 +470,13 @@ pub fn write_file(settings: &Settings) {
         let _ = std::fs::write(
             p,
             format!(
-                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\n",
+                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\n",
                 settings.dock_mode.key(),
                 settings.dock_size.key(),
                 settings.magnify.key(),
                 settings.opacity * 100.0,
-                settings.theme.key()
+                settings.theme.key(),
+                settings.language.key()
             ),
         );
     }

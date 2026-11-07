@@ -26,6 +26,7 @@ use windows::Win32::UI::Controls::{
 use windows::Win32::UI::Shell::{IShellLinkW, ShellExecuteW, ShellLink};
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, LoadIconW, PostMessageW, SW_SHOWNORMAL, WM_CLOSE};
 
+use crate::i18n::t;
 use crate::util::{pcwstr, wide};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -175,41 +176,65 @@ fn ask(
 
 fn install_flow() -> bool {
     let Some(dir) = install_dir() else { return false };
+    let tr = crate::i18n::is_turkish();
     let (title, content, first) = match installed_version() {
         None => (
-            "Pollen'ı kur".to_string(),
-            format!(
-                "Pollen görev çubuğunun yerine bir dock ve ekranın üstüne bir ada koyar. \
-                 Pollen'dan çıkınca görev çubuğu geri gelir.\n\nKurulum yeri: {}",
-                dir.display()
+            t("Pollen'ı kur", "Install Pollen").to_string(),
+            if tr {
+                format!(
+                    "Pollen görev çubuğunun yerine bir dock ve ekranın üstüne bir ada koyar. \
+                     Pollen'dan çıkınca görev çubuğu geri gelir.\n\nKurulum yeri: {}",
+                    dir.display()
+                )
+            } else {
+                format!(
+                    "Pollen puts a dock in place of the taskbar and an island at the top of the screen. \
+                     Quitting Pollen brings the taskbar back.\n\nInstalls to: {}",
+                    dir.display()
+                )
+            },
+            (
+                INSTALL,
+                t(
+                    "Kur\nBaşlat menüsüne eklenir; Ayarlar › Uygulamalar'dan kaldırılabilir",
+                    "Install\nAdded to the Start menu; remove it from Settings › Apps",
+                )
+                .to_string(),
             ),
-            (INSTALL, "Kur\nBaşlat menüsüne eklenir; Ayarlar › Uygulamalar'dan kaldırılabilir".to_string()),
         ),
         Some(v) if v == VERSION => (
-            "Pollen zaten kurulu".to_string(),
-            format!("Kurulu sürüm: {v}"),
-            (OPEN_INSTALLED, "Kurulu Pollen'ı aç".to_string()),
+            t("Pollen zaten kurulu", "Pollen is already installed").to_string(),
+            format!("{} {v}", t("Kurulu sürüm:", "Installed version:")),
+            (OPEN_INSTALLED, t("Kurulu Pollen'ı aç", "Open the installed Pollen").to_string()),
         ),
         Some(v) => (
-            format!("Pollen {VERSION} sürümüne güncellensin mi?"),
-            format!("Kurulu sürüm: {v}. Ayarların ve sabitlediklerin korunur."),
-            (INSTALL, format!("Güncelle\n{v} → {VERSION}")),
+            if tr { format!("Pollen {VERSION} sürümüne güncellensin mi?") } else { format!("Update Pollen to {VERSION}?") },
+            if tr {
+                format!("Kurulu sürüm: {v}. Ayarların ve sabitlediklerin korunur.")
+            } else {
+                format!("Installed version: {v}. Your settings and pins stay.")
+            },
+            (INSTALL, format!("{}\n{v} → {VERSION}", t("Güncelle", "Update"))),
         ),
     };
     let mut buttons = vec![(first.0, first.1.as_str())];
-    let reinstall = "Yeniden kur";
+    let reinstall = t("Yeniden kur", "Reinstall");
     if first.0 == OPEN_INSTALLED {
         buttons.push((INSTALL, reinstall));
     }
-    buttons.push((RUN_HERE, "Kurmadan çalıştır\nBu dosyayı olduğu yerden çalıştırır"));
+    buttons.push((
+        RUN_HERE,
+        t("Kurmadan çalıştır\nBu dosyayı olduğu yerden çalıştırır", "Run without installing\nRuns this file where it is"),
+    ));
     let autostart_now = crate::autostart::is_enabled_anywhere();
-    let (pressed, autostart) = ask(&title, &content, &buttons, Some(("Windows ile başlat", autostart_now)));
+    let (pressed, autostart) =
+        ask(&title, &content, &buttons, Some((t("Windows ile başlat", "Start with Windows"), autostart_now)));
     match pressed {
         INSTALL => {
             match install(autostart) {
                 Ok(()) => launch_installed(),
                 Err(e) => {
-                    ask("Pollen kurulamadı", &e, &[], None);
+                    ask(t("Pollen kurulamadı", "Pollen could not be installed"), &e, &[], None);
                 }
             }
             true
@@ -282,7 +307,7 @@ fn make_shortcut(target: &Path) -> windows::core::Result<()> {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_ALL)?;
         let target_w = HSTRING::from(target.as_os_str());
         link.SetPath(&target_w)?;
-        link.SetDescription(w!("Pollen: dock ve ada"))?;
+        link.SetDescription(&HSTRING::from(t("Pollen: dock ve ada", "Pollen: dock and island")))?;
         link.SetIconLocation(&target_w, 0)?;
         if let Some(dir) = target.parent() {
             link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str()))?;
@@ -333,10 +358,13 @@ fn register(exe: &Path, dir: &Path) {
 
 fn uninstall_flow() {
     let (pressed, wipe) = ask(
-        "Pollen kaldırılsın mı?",
-        "Görev çubuğu geri gelir; Başlat menüsündeki kısayol ve Uygulamalar listesindeki kayıt silinir.",
-        &[(UNINSTALL, "Kaldır")],
-        Some(("Ayarlarımı ve sabitlediklerimi de sil", false)),
+        t("Pollen kaldırılsın mı?", "Uninstall Pollen?"),
+        t(
+            "Görev çubuğu geri gelir; Başlat menüsündeki kısayol ve Uygulamalar listesindeki kayıt silinir.",
+            "The taskbar comes back; the Start menu shortcut and the entry in Apps are removed.",
+        ),
+        &[(UNINSTALL, t("Kaldır", "Uninstall"))],
+        Some((t("Ayarlarımı ve sabitlediklerimi de sil", "Also delete my settings and pins"), false)),
     );
     if pressed != UNINSTALL {
         return;
