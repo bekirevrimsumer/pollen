@@ -5,5 +5,6 @@ pub mod audio;
 pub mod displays;
 pub mod media;
 pub mod network;
+pub mod privacy;
 pub mod system;
 pub mod weather;

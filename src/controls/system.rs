@@ -113,6 +113,30 @@ fn network_octets() -> Option<(u64, u64)> {
     }
 }
 
+/// How long Windows has been running: "3 sa 12 dk", "2 gün 4 sa".
+pub fn uptime() -> String {
+    let minutes = unsafe { windows::Win32::System::SystemInformation::GetTickCount64() } / 60_000;
+    let (days, hours, minutes) = (minutes / 1440, minutes / 60 % 24, minutes % 60);
+    if days > 0 {
+        format!("{days} gün {hours} sa")
+    } else if hours > 0 {
+        format!("{hours} sa {minutes} dk")
+    } else {
+        format!("{minutes} dk")
+    }
+}
+
+/// Pollen's own memory, as Task Manager shows it (private working set).
+pub fn own_memory() -> Option<u64> {
+    use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX2};
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    let mut counters = PROCESS_MEMORY_COUNTERS_EX2 { cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX2>() as u32, ..Default::default() };
+    unsafe {
+        GetProcessMemoryInfo(GetCurrentProcess(), &mut counters as *mut _ as *mut PROCESS_MEMORY_COUNTERS, counters.cb).ok()?;
+    }
+    Some(counters.PrivateWorkingSetSize as u64)
+}
+
 /// "9,7 GB", "640 MB".
 pub fn format_bytes(bytes: u64) -> String {
     let gb = bytes as f64 / 1024f64.powi(3);

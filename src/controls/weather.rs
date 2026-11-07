@@ -30,6 +30,27 @@ pub struct Weather {
     /// WMO weather code.
     pub code: i64,
     pub day: bool,
+    /// The next hours.
+    pub hours: Vec<Hour>,
+    /// The next days, after today.
+    pub days: Vec<Day>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Hour {
+    pub hour: u32,
+    pub temperature: f64,
+    pub code: i64,
+    pub day: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct Day {
+    /// Year, month, day.
+    pub date: (i32, u32, u32),
+    pub high: f64,
+    pub low: f64,
+    pub code: i64,
 }
 
 impl Weather {
@@ -281,17 +302,59 @@ fn locate() -> Option<(f64, f64, String)> {
 fn fetch(lat: f64, lon: f64, city: &str) -> Option<Weather> {
     let url = format!(
         "https://api.open-meteo.com/v1/forecast?latitude={lat:.3}&longitude={lon:.3}\
-         &current=temperature_2m,weather_code,is_day&daily=temperature_2m_max,temperature_2m_min\
-         &forecast_days=1&timezone=auto"
+         &current=temperature_2m,weather_code,is_day&hourly=temperature_2m,weather_code,is_day\
+         &daily=weather_code,temperature_2m_max,temperature_2m_min&forecast_days=6&timezone=auto"
     );
     let j = get_json(&url)?;
     let current = &j["current"];
+    let now = current["time"].as_str().unwrap_or_default().to_string();
+
+    // The hours after the current one ("2026-11-07T18:00" sorts like time).
+    let hourly = &j["hourly"];
+    let mut hours = Vec::new();
+    if let Some(times) = hourly["time"].as_array() {
+        for (i, time) in times.iter().enumerate() {
+            let Some(time) = time.as_str() else { continue };
+            if time <= now.as_str() {
+                continue;
+            }
+            let Some(temperature) = number(&hourly["temperature_2m"][i]) else { continue };
+            hours.push(Hour {
+                hour: time.get(11..13).and_then(|h| h.parse().ok()).unwrap_or(0),
+                temperature,
+                code: hourly["weather_code"][i].as_i64().unwrap_or(-1),
+                day: hourly["is_day"][i].as_i64() != Some(0),
+            });
+            if hours.len() == 6 {
+                break;
+            }
+        }
+    }
+
+    let daily = &j["daily"];
+    let mut days = Vec::new();
+    if let Some(dates) = daily["time"].as_array() {
+        for (i, date) in dates.iter().enumerate().skip(1) {
+            let Some(date) = date.as_str() else { continue };
+            let mut parts = date.split('-').filter_map(|p| p.parse::<i64>().ok());
+            let (Some(y), Some(m), Some(d)) = (parts.next(), parts.next(), parts.next()) else { continue };
+            days.push(Day {
+                date: (y as i32, m as u32, d as u32),
+                high: number(&daily["temperature_2m_max"][i]).unwrap_or(f64::NAN),
+                low: number(&daily["temperature_2m_min"][i]).unwrap_or(f64::NAN),
+                code: daily["weather_code"][i].as_i64().unwrap_or(-1),
+            });
+        }
+    }
+
     Some(Weather {
         city: city.to_string(),
         temperature: number(&current["temperature_2m"])?,
         code: current["weather_code"].as_i64().unwrap_or(-1),
         day: current["is_day"].as_i64() != Some(0),
-        high: number(&j["daily"]["temperature_2m_max"][0]).unwrap_or(f64::NAN),
-        low: number(&j["daily"]["temperature_2m_min"][0]).unwrap_or(f64::NAN),
+        high: number(&daily["temperature_2m_max"][0]).unwrap_or(f64::NAN),
+        low: number(&daily["temperature_2m_min"][0]).unwrap_or(f64::NAN),
+        hours,
+        days,
     })
 }

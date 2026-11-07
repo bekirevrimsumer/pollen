@@ -54,9 +54,16 @@ Direct2D. No WebView, no GPU device, no background polling: about 16 MB in Task 
 - Control Center: network and sound-output tiles (Wi-Fi / Bluetooth tiles when the
   computer has them), shortcut buttons, and sliders for the volume and for each
   monitor's brightness separately over DDC/CI (Nectar changed all monitors at once)
-- Status: the weather (city, condition, today's high and low), CPU, memory, free
-  space on C: and network speed. When nothing plays, the closed island shows the
-  weather on the left, the time in the middle and the date on the right
+- Status: CPU, memory, free space on C:, network speed, uptime and Pollen's own
+  memory
+- Weather: now (with today's high and low), the next six hours and the next five
+  days. When nothing plays, the closed island shows the weather on the left, the
+  time in the middle and the date on the right
+- Microphone and camera: while an app uses them, an orange (microphone) or green
+  (camera) dot shows on the closed island and the app's name in the open one. Read
+  from what Windows records about each app's use, waiting for changes (no polling)
+- Volume: changing it from the keyboard or elsewhere widens the closed island for
+  a moment to show the level (Windows' own indicator still shows too)
 - Calendar: a plain month view (Monday first), today highlighted, previous / next
   month. No accounts or calendar sync
 - Settings: the dock's mode, size and magnification, the weather's place, the

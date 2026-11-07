@@ -1,11 +1,16 @@
 //! The default output device: its name, volume and mute, and the apps' own
 //! volumes in the mixer (Core Audio).
 
-use windows::core::{Interface, GUID};
+use windows::core::{Interface, GUID, PCWSTR};
+use windows::Win32::Foundation::{HWND, LPARAM, PROPERTYKEY, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 use windows::Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName;
-use windows::Win32::Media::Audio::Endpoints::{IAudioEndpointVolume, IAudioMeterInformation};
+use windows::Win32::Media::Audio::Endpoints::{
+    IAudioEndpointVolume, IAudioEndpointVolumeCallback, IAudioEndpointVolumeCallback_Impl, IAudioMeterInformation,
+};
 use windows::Win32::Media::Audio::{
-    eMultimedia, eRender, IAudioSessionControl2, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator, ISimpleAudioVolume,
+    eMultimedia, eRender, EDataFlow, ERole, IAudioSessionControl2, IMMNotificationClient, IMMNotificationClient_Impl,
+    AUDIO_VOLUME_NOTIFICATION_DATA, DEVICE_STATE, IAudioSessionManager2, IMMDevice, IMMDeviceEnumerator, ISimpleAudioVolume,
     MMDeviceEnumerator,
 };
 use windows::Win32::System::Com::StructuredStorage::{PropVariantClear, PropVariantToStringAlloc};
@@ -57,9 +62,9 @@ pub fn read() -> Option<Output> {
 pub fn set_volume(level: f32) {
     let Some((_, volume)) = endpoint() else { return };
     unsafe {
-        let _ = volume.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), &GUID::zeroed());
+        let _ = volume.SetMasterVolumeLevelScalar(level.clamp(0.0, 1.0), &POLLEN_CHANGE);
         if level > 0.0 && volume.GetMute().map(|m| m.as_bool()).unwrap_or(false) {
-            let _ = volume.SetMute(false, &GUID::zeroed());
+            let _ = volume.SetMute(false, &POLLEN_CHANGE);
         }
     }
 }
@@ -68,7 +73,7 @@ pub fn toggle_mute() {
     let Some((_, volume)) = endpoint() else { return };
     unsafe {
         let muted = volume.GetMute().map(|m| m.as_bool()).unwrap_or(false);
-        let _ = volume.SetMute(!muted, &GUID::zeroed());
+        let _ = volume.SetMute(!muted, &POLLEN_CHANGE);
     }
 }
 
@@ -223,6 +228,112 @@ pub fn toggle_app_mute(app: &str, name: &str) {
     for session in &sessions {
         unsafe {
             let _ = session.SetMute(!muted, std::ptr::null());
+        }
+    }
+}
+
+/// Marks volume changes Pollen makes itself, so the change notifications for
+/// them can be told apart from the keyboard's.
+const POLLEN_CHANGE: GUID = GUID::from_u128(0x5f0c_2a71_7d1e_4b6a_9c3e_0b8a_6d2f_41a9);
+
+/// Tells a window about every volume change on the default output (from the
+/// keyboard, the tray, an app) and about a new default output.
+pub struct Watch {
+    devices: IMMDeviceEnumerator,
+    client: IMMNotificationClient,
+    endpoint: Option<(IAudioEndpointVolume, IAudioEndpointVolumeCallback)>,
+    notify: isize,
+    volume_message: u32,
+}
+
+#[windows::core::implement(IAudioEndpointVolumeCallback)]
+struct VolumeCallback {
+    notify: isize,
+    message: u32,
+}
+
+impl IAudioEndpointVolumeCallback_Impl for VolumeCallback_Impl {
+    fn OnNotify(&self, data: *mut AUDIO_VOLUME_NOTIFICATION_DATA) -> windows::core::Result<()> {
+        let Some(data) = (unsafe { data.as_ref() }) else { return Ok(()) };
+        if data.guidEventContext == POLLEN_CHANGE {
+            return Ok(());
+        }
+        // Volume in thousandths, and the mute flag above it.
+        let packed = (data.fMasterVolume.clamp(0.0, 1.0) * 1000.0).round() as usize | ((data.bMuted.as_bool() as usize) << 16);
+        unsafe {
+            let _ = PostMessageW(Some(HWND(self.notify as *mut _)), self.message, WPARAM(packed), LPARAM(0));
+        }
+        Ok(())
+    }
+}
+
+#[windows::core::implement(IMMNotificationClient)]
+struct DeviceCallback {
+    notify: isize,
+    message: u32,
+}
+
+impl IMMNotificationClient_Impl for DeviceCallback_Impl {
+    fn OnDeviceStateChanged(&self, _: &PCWSTR, _: DEVICE_STATE) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnDeviceAdded(&self, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnDeviceRemoved(&self, _: &PCWSTR) -> windows::core::Result<()> {
+        Ok(())
+    }
+    fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, _: &PCWSTR) -> windows::core::Result<()> {
+        if flow == eRender && role == eMultimedia {
+            unsafe {
+                let _ = PostMessageW(Some(HWND(self.notify as *mut _)), self.message, WPARAM(0), LPARAM(0));
+            }
+        }
+        Ok(())
+    }
+    fn OnPropertyValueChanged(&self, _: &PCWSTR, _: &PROPERTYKEY) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+impl Watch {
+    /// `volume_message` carries the volume (wparam & 0xFFFF, in thousandths)
+    /// and mute (bit 16); `device_message` asks for `rearm`.
+    pub fn start(notify: HWND, volume_message: u32, device_message: u32) -> Option<Watch> {
+        unsafe {
+            let devices: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            let client: IMMNotificationClient = DeviceCallback { notify: notify.0 as isize, message: device_message }.into();
+            devices.RegisterEndpointNotificationCallback(&client).ok()?;
+            let mut watch = Watch { devices, client, endpoint: None, notify: notify.0 as isize, volume_message };
+            watch.rearm();
+            Some(watch)
+        }
+    }
+
+    /// Follows the default output after it changed.
+    pub fn rearm(&mut self) {
+        unsafe {
+            if let Some((volume, callback)) = self.endpoint.take() {
+                let _ = volume.UnregisterControlChangeNotify(&callback);
+            }
+            let Ok(device) = self.devices.GetDefaultAudioEndpoint(eRender, eMultimedia) else { return };
+            let Ok(volume) = device.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None) else { return };
+            let callback: IAudioEndpointVolumeCallback =
+                VolumeCallback { notify: self.notify, message: self.volume_message }.into();
+            if volume.RegisterControlChangeNotify(&callback).is_ok() {
+                self.endpoint = Some((volume, callback));
+            }
+        }
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        unsafe {
+            if let Some((volume, callback)) = self.endpoint.take() {
+                let _ = volume.UnregisterControlChangeNotify(&callback);
+            }
+            let _ = self.devices.UnregisterEndpointNotificationCallback(&self.client);
         }
     }
 }

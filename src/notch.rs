@@ -56,7 +56,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::Spring;
-use crate::controls::{audio, displays, media, network, system, weather};
+use crate::controls::{audio, displays, media, network, privacy, system, weather};
 use crate::pacer;
 use crate::render::Surface;
 use crate::settings::{self, DockMode, DockSize, Magnify, Settings};
@@ -100,6 +100,11 @@ const ART: f32 = 76.0;
 const TIMER_STATS: usize = 5;
 /// Searches for the typed place a moment after the typing stops.
 const TIMER_SEARCH: usize = 6;
+/// How long the volume indicator stays up after the last change.
+const TIMER_OSD: usize = 7;
+const OSD_MS: u32 = 1500;
+/// The closed island's width while it shows the volume (DIPs).
+const OSD_WIDTH: f32 = 240.0;
 
 /// Posted by the display worker when monitors or values change.
 const WM_DISPLAYS: u32 = WM_APP + 4;
@@ -113,6 +118,15 @@ const WM_WEATHER: u32 = WM_APP + 7;
 const WM_SETTINGS_CHANGED: u32 = WM_APP + 8;
 /// A place search finished (`SEARCH`).
 const WM_PLACES: u32 = WM_APP + 9;
+/// The apps using the microphone or camera changed.
+const WM_PRIVACY: u32 = WM_APP + 10;
+/// The output's volume changed (from the keyboard, the tray, an app).
+const WM_VOLUME: u32 = WM_APP + 11;
+/// A new default output.
+const WM_AUDIO_DEVICE: u32 = WM_APP + 12;
+/// iOS's colors: orange for the microphone, green for the camera.
+const MIC_COLOR: D2D1_COLOR_F = rgba(1.0, 0.62, 0.04, 1.0);
+const CAMERA_COLOR: D2D1_COLOR_F = rgba(0.19, 0.82, 0.35, 1.0);
 const WM_CHAR: u32 = 0x0102;
 const WM_ACTIVATE: u32 = 0x0006;
 
@@ -154,6 +168,12 @@ const ICON_ZOOM: char = '\u{E71E}';
 const ICON_COLOR: char = '\u{E790}';
 const ICON_POWER: char = '\u{E7E8}';
 const ICON_PLACE: char = '\u{E81D}';
+const ICON_CLOCK: char = '\u{E823}';
+const ICON_INFO: char = '\u{E946}';
+// Segoe Fluent Icons has no rain or snow; DirectWrite falls back to Segoe UI Symbol.
+const ICON_PARTLY: char = '\u{26C5}';
+const ICON_RAIN: char = '\u{2602}';
+const ICON_SNOW: char = '\u{2744}';
 /// A place search result's row.
 const RESULT_HEIGHT: f32 = 28.0;
 
@@ -337,13 +357,22 @@ struct CityEdit {
 }
 
 /// Tabs: (icon, available yet).
-const TABS: [(char, bool); 5] =
-    [(ICON_MUSIC, true), (ICON_CONTROLS, true), (ICON_STATUS, true), (ICON_CALENDAR, true), (ICON_GEAR, true)];
+const TABS: [(char, bool); 6] = [
+    (ICON_MUSIC, true),
+    (ICON_CONTROLS, true),
+    (ICON_STATUS, true),
+    (ICON_CLOUD, true),
+    (ICON_CALENDAR, true),
+    (ICON_GEAR, true),
+];
 const MUSIC_TAB: usize = 0;
 const CONTROL_CENTER_TAB: usize = 1;
 const STATUS_TAB: usize = 2;
-const CALENDAR_TAB: usize = 3;
-const SETTINGS_TAB: usize = 4;
+const WEATHER_TAB: usize = 3;
+const CALENDAR_TAB: usize = 4;
+const SETTINGS_TAB: usize = 5;
+/// A row of the Weather tab's coming days.
+const DAY_ROW: f32 = 26.0;
 /// A Settings row's height.
 const CHOICE_HEIGHT: f32 = 28.0;
 
@@ -403,10 +432,18 @@ pub struct Notch {
     level_running: bool,
     /// 0..1: how much room the closed island gives to the playing track.
     music: Spring,
+    /// The volume indicator's share of the closed island (0..1).
+    osd_room: Spring,
+    volume_watch: Option<audio::Watch>,
+    /// Who uses the microphone and camera, and the dots' room (0..1).
+    privacy: privacy::InUse,
+    privacy_room: Spring,
     track_format: IDWriteTextFormat,
     play_format: IDWriteTextFormat,
     big_format: IDWriteTextFormat,
     big_icon_format: IDWriteTextFormat,
+    symbol_format: IDWriteTextFormat,
+    big_symbol_format: IDWriteTextFormat,
     weather: Option<weather::Weather>,
     /// The weather's place picked by hand.
     place: Option<weather::Place>,
@@ -513,10 +550,16 @@ impl Notch {
                 bars: [0.0; 4],
                 level_running: false,
                 music: Spring::new(0.0),
+                osd_room: Spring::new(0.0),
+                volume_watch: None,
+                privacy: privacy::InUse::default(),
+                privacy_room: Spring::new(0.0),
                 track_format: formats.track,
                 play_format: formats.play,
                 big_format: formats.big,
                 big_icon_format: formats.big_icon,
+                symbol_format: formats.symbol,
+                big_symbol_format: formats.big_symbol,
                 weather: None,
                 place: weather::saved_place(),
                 city_edit: None,
@@ -539,6 +582,8 @@ impl Notch {
             displays::start(hwnd, WM_DISPLAYS);
             media::start(hwnd, WM_MEDIA);
             weather::start(hwnd, WM_WEATHER);
+            privacy::start(hwnd, WM_PRIVACY);
+            notch.volume_watch = audio::Watch::start(hwnd, WM_VOLUME, WM_AUDIO_DEVICE);
             notch.update_stats_timer();
             network::refresh_radios(|| post(WM_RADIOS));
 
@@ -576,6 +621,8 @@ impl Notch {
                     self.play_format = f.play;
                     self.big_format = f.big;
                     self.big_icon_format = f.big_icon;
+                    self.symbol_format = f.symbol;
+                    self.big_symbol_format = f.big_symbol;
                 }
             }
             let m = info.rcMonitor;
@@ -822,7 +869,14 @@ impl Notch {
     fn panel_height(&self) -> f32 {
         match self.tab {
             MUSIC_TAB => return self.music_height(),
-            STATUS_TAB => return PAD * 0.7 + 64.0 + 10.0 + 52.0 * 2.0 + 10.0 + PAD * 0.8,
+            STATUS_TAB => return PAD * 0.7 + 52.0 * 3.0 + 10.0 * 2.0 + PAD * 0.8,
+            WEATHER_TAB => {
+                let days = self.weather.as_ref().map_or(0, |w| w.days.len()) as f32;
+                return match &self.weather {
+                    Some(_) => PAD * 0.7 + 64.0 + 10.0 + 72.0 + 10.0 + days * DAY_ROW + 12.0 + PAD * 0.8,
+                    None => PAD * 0.7 + 64.0 + PAD * 0.8,
+                };
+            }
             CALENDAR_TAB => return PAD * 0.7 + 28.0 + 6.0 + 18.0 + 6.0 * 28.0 + PAD * 0.6,
             SETTINGS_TAB => {
                 let rows = Choice::ALL.len() as f32 + 1.0;
@@ -858,7 +912,81 @@ impl Notch {
         // in a side as wide as the date.
         let status = tw + 2.0 * (dw.max(STATUS_SIDE * s) + 30.0 * s);
         let music = (tw + dw + 8.0 * s + 36.0 * s).max(CLOSED_MIN_WIDTH * s) + 64.0 * s;
-        lerp(status, music, m)
+        let normal = lerp(status, music, m) + 2.0 * self.privacy_inset();
+        lerp(normal, OSD_WIDTH * s, self.osd_room.value.clamp(0.0, 1.0))
+    }
+
+    /// A volume change from outside Pollen: the closed island widens for a
+    /// moment to show it (the open panel's slider just follows).
+    fn on_volume(&mut self, packed: usize) {
+        let volume = (packed & 0xFFFF) as f32 / 1000.0;
+        let muted = (packed >> 16) & 1 != 0;
+        if self.dragging == Some(Slider::Volume) {
+            return;
+        }
+        match &mut self.output {
+            Some(o) => {
+                o.volume = volume;
+                o.muted = muted;
+            }
+            None => self.output = audio::read(),
+        }
+        if self.open.target < 0.5 && !self.hidden_for_fullscreen && !self.headless {
+            self.osd_room.target = 1.0;
+            unsafe { SetTimer(Some(self.hwnd), TIMER_OSD, OSD_MS, None) };
+            self.start_animation();
+        }
+        self.render();
+    }
+
+    /// The volume indicator: speaker, level bar, percentage.
+    fn draw_osd(&self, island: D2D_RECT_F, cy: f32, alpha: f32) {
+        let s = self.scale;
+        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let (volume, muted) = self.output.as_ref().map_or((0.0, false), |o| (o.volume, o.muted));
+        let level = if muted { 0.0 } else { volume };
+        let glyph = if level <= 0.0 { ICON_MUTE } else { ICON_VOLUME };
+        let x = island.left + 16.0 * s;
+        self.icon(glyph, &self.icon_format, rect(x, cy - 9.0 * s, x + 18.0 * s, cy + 9.0 * s), white(0.95));
+        let text = format!("%{}", (level * 100.0).round() as u32);
+        let (tw, th) = self.text_size(&text, &self.date_format);
+        let right = island.right - 16.0 * s;
+        self.text(&text, &self.date_format, pt(right - tw, cy - th / 2.0), white(0.8), tw + 4.0);
+        let track = rect(x + 28.0 * s, cy - 2.5 * s, right - 40.0 * s, cy + 2.5 * s);
+        self.fill_rounded(track, 2.5 * s, white(0.18));
+        let fill = rect(track.left, track.top, track.left + (track.right - track.left) * level, track.bottom);
+        if fill.right - fill.left > 0.5 {
+            self.fill_rounded(fill, 2.5 * s, white(0.95));
+        }
+    }
+
+    /// Room for the microphone / camera dots on the right of the closed
+    /// island (the island grows by as much on the left, to stay centered).
+    fn privacy_inset(&self) -> f32 {
+        let n = (!self.privacy.microphone.is_empty()) as usize + (!self.privacy.camera.is_empty()) as usize;
+        let width = if n == 0 { 14.0 } else { n as f32 * 7.0 + (n as f32 - 1.0) * 4.0 + 8.0 };
+        width * self.privacy_room.value.clamp(0.0, 1.0) * self.scale
+    }
+
+    /// The dots, colored, right-aligned at `right`; returns their left edge.
+    fn draw_privacy_dots(&self, right: f32, cy: f32, alpha: f32) -> f32 {
+        let s = self.scale;
+        let mut x = right;
+        for (on, color) in [(!self.privacy.camera.is_empty(), CAMERA_COLOR), (!self.privacy.microphone.is_empty(), MIC_COLOR)] {
+            if on {
+                let d = 7.0 * s;
+                self.fill_rounded(rect(x - d, cy - d / 2.0, x, cy + d / 2.0), d / 2.0, with_alpha(color, alpha));
+                x -= d + 4.0 * s;
+            }
+        }
+        x
+    }
+
+    fn on_privacy(&mut self) {
+        self.privacy = privacy::current();
+        self.privacy_room.target = if self.privacy.any() { 1.0 } else { 0.0 };
+        self.start_animation();
+        self.render();
     }
 
     /// The island right now.
@@ -1110,6 +1238,13 @@ impl Notch {
         if self.open.target != target {
             self.open.target = target;
             if open {
+                // Opening replaces the volume indicator.
+                self.osd_room.target = 0.0;
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_OSD);
+                }
+            }
+            if open {
                 // Music while something plays, otherwise the Control Center.
                 self.tab = if self.playing() { MUSIC_TAB } else { CONTROL_CENTER_TAB };
                 self.player = None;
@@ -1161,6 +1296,8 @@ impl Notch {
         moving |= self.open.step(dt, 312.5, 35.0);
         moving |= self.music.step(dt, 312.5, 35.0);
         moving |= self.panel_h.step(dt, 312.5, 35.0);
+        moving |= self.privacy_room.step(dt, 312.5, 35.0);
+        moving |= self.osd_room.step(dt, 400.0, 34.0);
 
         self.render();
         if !moving {
@@ -1211,6 +1348,18 @@ impl Notch {
         let s = glyph.to_string();
         let (w, h) = self.text_size(&s, format);
         self.text(&s, format, pt((r.left + r.right - w) / 2.0, (r.top + r.bottom - h) / 2.0), color, w + 4.0);
+    }
+
+    /// A weather glyph: Segoe Fluent Icons, or Segoe UI Symbol for the ones it lacks.
+    fn weather_symbol(&self, glyph: char, big: bool, r: D2D_RECT_F, color: D2D1_COLOR_F) {
+        let symbol = matches!(glyph, ICON_PARTLY | ICON_RAIN | ICON_SNOW);
+        let format = match (symbol, big) {
+            (true, true) => &self.big_symbol_format,
+            (true, false) => &self.symbol_format,
+            (false, true) => &self.big_icon_format,
+            (false, false) => &self.icon_format,
+        };
+        self.icon(glyph, format, r, color);
     }
 
     fn fill_rounded(&self, r: D2D_RECT_F, radius: f32, color: D2D1_COLOR_F) {
@@ -1292,7 +1441,14 @@ impl Notch {
 
             rt.PushAxisAlignedClip(&island, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             // Closed: time and date, fading out as it opens.
-            let closed = self.content * (1.0 - o * 2.5).clamp(0.0, 1.0);
+            let closed_all = self.content * (1.0 - o * 2.5).clamp(0.0, 1.0);
+            let osd = self.osd_room.value.clamp(0.0, 1.0);
+            // The volume indicator takes the closed island's place for a moment.
+            let closed = closed_all * (1.0 - osd * 1.6).clamp(0.0, 1.0);
+            if closed_all > 0.0 && osd > 0.01 {
+                let cy = island.top + BAR * s / 2.0;
+                self.draw_osd(island, cy, closed_all * ((osd - 0.35) / 0.65).clamp(0.0, 1.0));
+            }
             if closed > 0.0 {
                 let (tw, th) = self.text_size(&self.time, &self.time_format);
                 let (dw, dh) = self.text_size(&self.date, &self.date_format);
@@ -1311,7 +1467,12 @@ impl Notch {
                 let mid = (island.left + island.right) / 2.0;
                 let together = mid - total / 2.0;
                 let x = lerp(mid - tw / 2.0, together, m);
-                let date_x = lerp(island.right - 14.0 * s - dw, together + tw + 8.0 * s, m);
+                let inset = self.privacy_inset();
+                let date_x = lerp(island.right - 14.0 * s - inset - dw, together + tw + 8.0 * s, m);
+                if self.privacy_room.value > 0.01 {
+                    let a = closed * self.privacy_room.value.clamp(0.0, 1.0);
+                    self.draw_privacy_dots(island.right - 14.0 * s, cy, a);
+                }
                 self.text(&self.time, &self.time_format, pt(x, cy - th / 2.0), rgba(1.0, 1.0, 1.0, 0.95 * closed), tw + 4.0);
                 self.text(
                     &self.date,
@@ -1362,7 +1523,7 @@ impl Notch {
         }
         let (w, gap) = (3.0 * s, 2.5 * s);
         let total = w * 4.0 + gap * 3.0;
-        let x0 = island.right - 14.0 * s - total;
+        let x0 = island.right - 14.0 * s - self.privacy_inset() - total;
         for (i, level) in self.bars.iter().enumerate() {
             let h = 3.0 * s + level.clamp(0.0, 1.0) * 13.0 * s;
             let x = x0 + i as f32 * (w + gap);
@@ -1379,56 +1540,18 @@ impl Notch {
             None => (ICON_CLOUD, "--°".to_string()),
         };
         let x = island.left + 14.0 * s;
-        self.icon(glyph, &self.icon_format, rect(x, cy - 8.0 * s, x + 16.0 * s, cy + 8.0 * s), white(0.85));
+        self.weather_symbol(glyph, false, rect(x, cy - 8.0 * s, x + 16.0 * s, cy + 8.0 * s), white(0.85));
         let (_, th) = self.text_size(&temp, &self.date_format);
         self.text(&temp, &self.date_format, pt(x + 20.0 * s, cy - th / 2.0), white(0.85), 40.0 * s);
     }
 
-    /// The Status tab: a weather card, then CPU, memory, disk and network cards.
+    /// The Status tab: CPU, memory, disk, network, uptime and Pollen's own memory.
     fn draw_status(&self, island: D2D_RECT_F, alpha: f32) {
         let s = self.scale;
         let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
         let left = island.left + PAD * s;
         let right = island.right - PAD * s;
-        let mut y = island.top + BAR * s + PAD * 0.7 * s;
-
-        let card = rect(left, y, right, y + 64.0 * s);
-        self.fill_rounded(card, 12.0 * s, white(0.05));
-        match &self.weather {
-            Some(w) => {
-                let icon = rect(card.left + 10.0 * s, card.top + 10.0 * s, card.left + 54.0 * s, card.bottom - 10.0 * s);
-                self.icon(weather_icon(w), &self.big_icon_format, icon, white(0.9));
-                let temp = format!("{:.0}°", w.temperature);
-                let (tw, th) = self.text_size(&temp, &self.big_format);
-                let tx = icon.right + 6.0 * s;
-                let cy = (card.top + card.bottom) / 2.0;
-                self.text(&temp, &self.big_format, pt(tx, cy - th / 2.0), white(0.95), tw + 4.0);
-                let x = tx + tw + 14.0 * s;
-                let condition = w.condition();
-                let (_, ch) = self.text_size(condition, &self.title_format);
-                let (_, nh) = self.text_size(&w.city, &self.small_format);
-                let top = cy - (ch + nh) / 2.0;
-                self.text(condition, &self.title_format, pt(x, top), white(0.9), card.right - x - 90.0 * s);
-                self.text(&w.city, &self.small_format, pt(x, top + ch), white(0.5), card.right - x - 90.0 * s);
-                if w.high.is_finite() && w.low.is_finite() {
-                    let range = format!("En yüksek {:.0}°  En düşük {:.0}°", w.high, w.low);
-                    let (rw, rh) = self.text_size(&range, &self.small_format);
-                    self.text(&range, &self.small_format, pt(card.right - 12.0 * s - rw, cy - rh / 2.0), white(0.55), rw + 4.0);
-                }
-            }
-            None => {
-                let text = "Hava durumu alınıyor…";
-                let (w, h) = self.text_size(text, &self.title_format);
-                self.text(
-                    text,
-                    &self.title_format,
-                    pt((card.left + card.right - w) / 2.0, (card.top + card.bottom - h) / 2.0),
-                    white(0.5),
-                    w + 4.0,
-                );
-            }
-        }
-        y = card.bottom + 10.0 * s;
+        let y = island.top + BAR * s + PAD * 0.7 * s;
 
         let st = &self.stats;
         let ratio = |used: u64, total: u64| if total > 0 { used as f32 / total as f32 } else { 0.0 };
@@ -1450,6 +1573,13 @@ impl Notch {
                 ICON_DOWN,
                 "Ağ".to_string(),
                 format!("↓ {}   ↑ {}", system::format_rate(st.down), system::format_rate(st.up)),
+                None,
+            ),
+            (ICON_CLOCK, "Açık kalma".to_string(), system::uptime(), None),
+            (
+                ICON_INFO,
+                "Pollen".to_string(),
+                system::own_memory().map(system::format_bytes).unwrap_or_default(),
                 None,
             ),
         ];
@@ -1479,6 +1609,99 @@ impl Notch {
                     self.text(value, &self.small_format, pt(r.left + 10.0 * s, r.bottom - 10.0 * s - vh), white(0.7), col - 20.0 * s);
                 }
             }
+        }
+    }
+
+    /// The Weather tab: now, the coming hours and the coming days.
+    fn draw_weather(&self, island: D2D_RECT_F, alpha: f32) {
+        let s = self.scale;
+        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let left = island.left + PAD * s;
+        let right = island.right - PAD * s;
+        let y = island.top + BAR * s + PAD * 0.7 * s;
+        let card = rect(left, y, right, y + 64.0 * s);
+        let Some(w) = &self.weather else {
+            let text = "Hava durumu alınıyor…";
+            let (tw, th) = self.text_size(text, &self.title_format);
+            self.text(text, &self.title_format, pt((left + right - tw) / 2.0, (card.top + card.bottom - th) / 2.0), white(0.5), tw + 4.0);
+            return;
+        };
+
+        // Now.
+        self.fill_rounded(card, 12.0 * s, white(0.05));
+        let icon = rect(card.left + 10.0 * s, card.top + 10.0 * s, card.left + 54.0 * s, card.bottom - 10.0 * s);
+        self.weather_symbol(weather_icon(w), true, icon, white(0.9));
+        let temp = format!("{:.0}°", w.temperature);
+        let (tw, th) = self.text_size(&temp, &self.big_format);
+        let tx = icon.right + 6.0 * s;
+        let cy = (card.top + card.bottom) / 2.0;
+        self.text(&temp, &self.big_format, pt(tx, cy - th / 2.0), white(0.95), tw + 4.0);
+        let x = tx + tw + 14.0 * s;
+        let condition = w.condition();
+        let (_, ch) = self.text_size(condition, &self.title_format);
+        let (_, nh) = self.text_size(&w.city, &self.small_format);
+        let top = cy - (ch + nh) / 2.0;
+        self.text(condition, &self.title_format, pt(x, top), white(0.9), card.right - x - 90.0 * s);
+        self.text(&w.city, &self.small_format, pt(x, top + ch), white(0.5), card.right - x - 90.0 * s);
+        if w.high.is_finite() && w.low.is_finite() {
+            let range = format!("↑ {:.0}°   ↓ {:.0}°", w.high, w.low);
+            let (rw, rh) = self.text_size(&range, &self.title_format);
+            self.text(&range, &self.title_format, pt(card.right - 14.0 * s - rw, cy - rh / 2.0), white(0.7), rw + 4.0);
+        }
+
+        // The coming hours.
+        let card = rect(left, card.bottom + 10.0 * s, right, card.bottom + 82.0 * s);
+        self.fill_rounded(card, 12.0 * s, white(0.05));
+        let n = w.hours.len().max(1) as f32;
+        let col = (card.right - card.left) / n;
+        for (i, h) in w.hours.iter().enumerate() {
+            let cx = card.left + col * (i as f32 + 0.5);
+            let label = format!("{:02}:00", h.hour);
+            let (lw, _) = self.text_size(&label, &self.small_format);
+            self.text(&label, &self.small_format, pt(cx - lw / 2.0, card.top + 8.0 * s), white(0.5), lw + 4.0);
+            let g = rect(cx - 9.0 * s, card.top + 27.0 * s, cx + 9.0 * s, card.top + 45.0 * s);
+            self.weather_symbol(weather_glyph(h.code, h.day), false, g, white(0.85));
+            let t = format!("{:.0}°", h.temperature);
+            let (tw, th) = self.text_size(&t, &self.title_format);
+            self.text(&t, &self.title_format, pt(cx - tw / 2.0, card.bottom - 8.0 * s - th), white(0.92), tw + 4.0);
+        }
+
+        // The coming days: name, sky, low, a bar across the week's range, high.
+        if w.days.is_empty() {
+            return;
+        }
+        let card = rect(left, card.bottom + 10.0 * s, right, card.bottom + 10.0 * s + (w.days.len() as f32 * DAY_ROW + 12.0) * s);
+        self.fill_rounded(card, 12.0 * s, white(0.05));
+        let lowest = w.days.iter().map(|d| d.low).filter(|v| v.is_finite()).fold(f64::INFINITY, f64::min);
+        let highest = w.days.iter().map(|d| d.high).filter(|v| v.is_finite()).fold(f64::NEG_INFINITY, f64::max);
+        let span = (highest - lowest).max(1.0);
+        let bar_left = card.left + 170.0 * s;
+        let bar_right = card.right - 52.0 * s;
+        for (i, d) in w.days.iter().enumerate() {
+            let cy = card.top + 6.0 * s + (i as f32 + 0.5) * DAY_ROW * s;
+            let name = if i == 0 {
+                "Yarın".to_string()
+            } else {
+                WEEKDAYS[weekday_monday0(d.date.0, d.date.1, d.date.2) as usize].to_string()
+            };
+            let (_, nh) = self.text_size(&name, &self.title_format);
+            self.text(&name, &self.title_format, pt(card.left + 14.0 * s, cy - nh / 2.0), white(0.9), 70.0 * s);
+            let g = rect(card.left + 84.0 * s, cy - 9.0 * s, card.left + 102.0 * s, cy + 9.0 * s);
+            self.weather_symbol(weather_glyph(d.code, true), false, g, white(0.85));
+            if !(d.low.is_finite() && d.high.is_finite()) {
+                continue;
+            }
+            let low = format!("{:.0}°", d.low);
+            let (lw, lh) = self.text_size(&low, &self.title_format);
+            self.text(&low, &self.title_format, pt(bar_left - 12.0 * s - lw, cy - lh / 2.0), white(0.55), lw + 4.0);
+            let high = format!("{:.0}°", d.high);
+            let (_, hh) = self.text_size(&high, &self.title_format);
+            self.text(&high, &self.title_format, pt(bar_right + 12.0 * s, cy - hh / 2.0), white(0.92), 40.0 * s);
+            let track = rect(bar_left, cy - 2.0 * s, bar_right, cy + 2.0 * s);
+            self.fill_rounded(track, 2.0 * s, white(0.10));
+            let at = |v: f64| bar_left + (bar_right - bar_left) * ((v - lowest) / span) as f32;
+            let fill = rect(at(d.low), track.top, at(d.high).max(at(d.low) + 4.0 * s), track.bottom);
+            self.fill_rounded(fill, 2.0 * s, with_alpha(ACCENT, alpha));
         }
     }
 
@@ -1672,13 +1895,35 @@ impl Notch {
         // Top row: time, tabs, date.
         let (_, th) = self.text_size(&self.time, &self.time_format);
         self.text(&self.time, &self.time_format, pt(island.left + 16.0 * s, cy - th / 2.0), white(0.95), 80.0 * s);
-        let (dw, dh) = self.text_size(&self.date, &self.date_format);
-        self.text(&self.date, &self.date_format, pt(island.right - 16.0 * s - dw, cy - dh / 2.0), white(0.65), dw + 4.0);
+        if self.privacy.any() {
+            // Who is listening or watching, in place of the date.
+            let mut names: Vec<&str> = self.privacy.camera.iter().map(String::as_str).collect();
+            for n in &self.privacy.microphone {
+                if !names.contains(&n.as_str()) {
+                    names.push(n);
+                }
+            }
+            let label = match names.len() {
+                0 | 1 => names.join(""),
+                n => format!("{} +{}", names[0], n - 1),
+            };
+            let dots_left = self.draw_privacy_dots(island.right - 16.0 * s, cy, alpha);
+            let (lw, lh) = self.text_size(&label, &self.date_format);
+            // Between the tabs and the dots.
+            let tabs_right = (island.left + island.right) / 2.0 + 40.0 * s * TABS.len() as f32 / 2.0;
+            let limit = (dots_left - 4.0 * s - tabs_right - 8.0 * s).max(0.0);
+            let x = dots_left - 4.0 * s - lw.min(limit);
+            self.text(&label, &self.date_format, pt(x, cy - lh / 2.0), white(0.8), limit);
+        } else {
+            let (dw, dh) = self.text_size(&self.date, &self.date_format);
+            self.text(&self.date, &self.date_format, pt(island.right - 16.0 * s - dw, cy - dh / 2.0), white(0.65), dw + 4.0);
+        }
 
         match self.tab {
             SETTINGS_TAB => self.draw_settings(island, alpha),
             MUSIC_TAB => self.draw_music(island, alpha),
             STATUS_TAB => self.draw_status(island, alpha),
+            WEATHER_TAB => self.draw_weather(island, alpha),
             CALENDAR_TAB => self.draw_calendar(island, alpha),
             _ => {}
         }
@@ -2356,6 +2601,13 @@ impl Notch {
             save(&notch, &format!("1-opening-{i}"));
         }
         save(&notch, "1-closed-music");
+        let output = notch.output.clone();
+        notch.output = Some(audio::Output { name: String::new(), volume: 0.42, muted: false });
+        notch.osd_room = Spring::new(1.0);
+        notch.render();
+        save(&notch, "1-closed-volume");
+        notch.osd_room = Spring::new(0.0);
+        notch.output = output;
         notch.tab = MUSIC_TAB;
         notch.refresh_app_volume();
         notch.sync_panel_height(false);
@@ -2376,7 +2628,7 @@ impl Notch {
         std::thread::sleep(Duration::from_millis(400));
         notch.stats = notch.sampler.sample();
         notch.month = (notch.today.0, notch.today.1);
-        for (tab, name) in [(STATUS_TAB, "2b-status"), (CALENDAR_TAB, "2c-calendar"), (SETTINGS_TAB, "2e-settings")] {
+        for (tab, name) in [(STATUS_TAB, "2b-status"), (WEATHER_TAB, "2d-weather"), (CALENDAR_TAB, "2c-calendar"), (SETTINGS_TAB, "2e-settings")] {
             notch.tab = tab;
             notch.sync_panel_height(false);
             notch.render();
@@ -2388,6 +2640,17 @@ impl Notch {
             latitude: 0.0,
             longitude: 0.0,
         };
+        notch.privacy = privacy::InUse { microphone: vec!["Discord".into()], camera: vec!["Zen".into()] };
+        notch.privacy_room = Spring::new(1.0);
+        notch.render();
+        save(&notch, "2h-privacy-open");
+        notch.open.target = 0.0;
+        step(&mut notch, 40);
+        save(&notch, "2i-privacy-closed");
+        notch.privacy = privacy::InUse::default();
+        notch.privacy_room = Spring::new(0.0);
+        notch.open.target = 1.0;
+        step(&mut notch, 40);
         notch.city_edit = Some(CityEdit {
             text: "Ürg".into(),
             results: vec![place("Ürgüp", "Nevşehir, Türkiye"), place("Ürgenç", "Harezm, Özbekistan")],
@@ -2447,6 +2710,9 @@ struct Formats {
     play: IDWriteTextFormat,
     big: IDWriteTextFormat,
     big_icon: IDWriteTextFormat,
+    /// Segoe UI Symbol, for the weather glyphs Segoe Fluent Icons lacks.
+    symbol: IDWriteTextFormat,
+    big_symbol: IDWriteTextFormat,
 }
 
 impl Formats {
@@ -2477,6 +2743,19 @@ impl Formats {
                 )
             }
         };
+        let symbols = |size: f32| -> Result<IDWriteTextFormat> {
+            unsafe {
+                dwrite.CreateTextFormat(
+                    w!("Segoe UI Symbol"),
+                    None,
+                    DWRITE_FONT_WEIGHT_NORMAL,
+                    DWRITE_FONT_STYLE_NORMAL,
+                    DWRITE_FONT_STRETCH_NORMAL,
+                    size * s,
+                    w!("tr-tr"),
+                )
+            }
+        };
         Ok(Formats {
             time: text(12.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             date: text(11.0, DWRITE_FONT_WEIGHT_MEDIUM)?,
@@ -2488,19 +2767,24 @@ impl Formats {
             play: icons(18.0)?,
             big: text(26.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             big_icon: icons(28.0)?,
+            symbol: symbols(15.0)?,
+            big_symbol: symbols(30.0)?,
         })
     }
 }
 
 fn weather_icon(w: &weather::Weather) -> char {
-    match w.code {
-        0 | 1 => {
-            if w.day {
-                ICON_SUN
-            } else {
-                ICON_MOON
-            }
-        }
+    weather_glyph(w.code, w.day)
+}
+
+/// A glyph for a WMO weather code.
+fn weather_glyph(code: i64, day: bool) -> char {
+    match code {
+        0 | 1 if day => ICON_SUN,
+        0 | 1 => ICON_MOON,
+        2 if day => ICON_PARTLY,
+        51..=67 | 80..=82 => ICON_RAIN,
+        71..=77 | 85 | 86 => ICON_SNOW,
         95..=99 => ICON_STORM,
         _ => ICON_CLOUD,
     }
@@ -2613,6 +2897,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_TIMER => {
             let notch = &mut *ptr;
             match wparam.0 {
+                TIMER_OSD => {
+                    let _ = KillTimer(Some(hwnd), TIMER_OSD);
+                    notch.osd_room.target = 0.0;
+                    notch.start_animation();
+                }
                 TIMER_SEARCH => {
                     let _ = KillTimer(Some(hwnd), TIMER_SEARCH);
                     notch.search_city();
@@ -2655,6 +2944,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 (*ptr).end_city_edit(false);
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_VOLUME => {
+            (*ptr).on_volume(wparam.0);
+            LRESULT(0)
+        }
+        WM_AUDIO_DEVICE => {
+            let notch = &mut *ptr;
+            if let Some(watch) = &mut notch.volume_watch {
+                watch.rearm();
+            }
+            notch.output = audio::read();
+            notch.render();
+            LRESULT(0)
+        }
+        WM_PRIVACY => {
+            (*ptr).on_privacy();
+            LRESULT(0)
         }
         WM_PLACES => {
             (*ptr).on_places();

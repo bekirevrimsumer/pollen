@@ -79,6 +79,7 @@ fn main() -> Result<()> {
                     println!("place: {} ({}) {:.3}, {:.3}", p.name, p.region, p.latitude, p.longitude);
                 }
             }
+            println!("privacy: {:?}", controls::privacy::read());
             let mut meter = controls::audio::Meter::new();
             println!("peaks: {:?}", meter.peaks());
             return Ok(());
