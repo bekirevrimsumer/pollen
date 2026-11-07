@@ -116,10 +116,8 @@ const CLOCK_PAD: f32 = 6.0;
 const HIDE_DELAY_MS: u32 = 800;
 
 /// Nectar's "Midnight" theme: hsl(#5e8bff's hue, 40%, 10%) = #0f1524.
-const SURFACE: (f32, f32, f32) = (9.0 / 255.0, 12.0 / 255.0, 20.0 / 255.0);
 /// Nectar's default (and "solid" style) background opacity.
 /// The accent / highlight color the theme was used with.
-const ACCENT: D2D1_COLOR_F = rgba(0.478, 0.635, 1.0, 1.0);
 
 const TIMER_REFRESH: usize = 2;
 const TIMER_POLL: usize = 3;
@@ -133,6 +131,8 @@ const PREVIEW_DELAY_MS: u32 = 300;
 const CMD_OPEN: usize = 1;
 const CMD_CLOSE: usize = 2;
 const CMD_QUIT: usize = 3;
+const CMD_PIN: usize = 4;
+const CMD_UNPIN: usize = 5;
 const CMD_MODE_FIXED: usize = 10;
 const CMD_MODE_SMART: usize = 11;
 const CMD_MODE_PEEK: usize = 12;
@@ -153,6 +153,8 @@ const WM_SYNC_FOREGROUND: u32 = WM_APP + 13;
 const WM_SYNC_MOVED: u32 = WM_APP + 14;
 const WM_SYNC_POLL: u32 = WM_APP + 15;
 const WM_SYNC_PINS: u32 = WM_APP + 16;
+/// Clicks on Pollen's notification area icon.
+const WM_TRAYICON: u32 = WM_APP + 17;
 const ABN_POSCHANGED: usize = 1;
 const ABN_FULLSCREENAPP: usize = 2;
 
@@ -282,6 +284,17 @@ pub fn settings_changed() {
 
 const fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
+}
+
+/// The theme's background color.
+fn surface() -> (f32, f32, f32) {
+    crate::settings::palette().surface
+}
+
+/// The theme's accent: what is selected or on.
+fn accent() -> D2D1_COLOR_F {
+    let (r, g, b) = crate::settings::palette().accent;
+    rgba(r, g, b, 1.0)
 }
 
 fn pt(x: f32, y: f32) -> Vector2 {
@@ -495,6 +508,8 @@ pub struct Dock {
     covered: bool,
     /// Smart and Peek: the mouse left only a moment ago.
     lingering: bool,
+    /// Its right-click menu is open (the dock stays up meanwhile).
+    menu_open: bool,
     /// The hovered app whose window previews are due or up.
     preview_for: Option<String>,
     hidden_for_fullscreen: bool,
@@ -603,6 +618,7 @@ impl Dock {
                 shown: false,
                 covered: false,
                 lingering: false,
+                menu_open: false,
                 preview_for: None,
                 hidden_for_fullscreen: false,
                 clock: String::new(),
@@ -650,6 +666,7 @@ impl Dock {
             }
 
             let _ = RegisterShellHookWindow(hwnd);
+            crate::appicon::add(hwnd, WM_TRAYICON);
             // Window moves, maximize/restore and minimize decide whether the bar
             // widens (Fixed) or hides (Smart).
             dock._event_hooks = [
@@ -887,7 +904,7 @@ impl Dock {
     }
 
     fn wants_to_show(&self) -> bool {
-        let engaged = self.mouse.is_some() || self.lingering || crate::preview::is_hovered();
+        let engaged = self.mouse.is_some() || self.lingering || self.menu_open || crate::preview::is_hovered();
         match self.settings.dock_mode {
             DockMode::Fixed => true,
             DockMode::Smart => engaged || !self.covered,
@@ -989,7 +1006,14 @@ impl Dock {
 
     fn reload_pins(&mut self) {
         self.pins_signature = apps::pins_signature();
-        let mut pins = apps::read_pins();
+        let hidden = settings::hidden_pins();
+        let mut pins: Vec<apps::Pin> =
+            apps::read_pins().into_iter().filter(|p| !hidden.contains(&p.launch.to_lowercase())).collect();
+        for launch in settings::own_pins() {
+            if !pins.iter().any(|p| p.launch.eq_ignore_ascii_case(&launch)) {
+                pins.push(apps::pin_for(&launch));
+            }
+        }
         let order = settings::pin_order();
         let rank = |launch: &str| {
             let key = format!("pin:{}", launch.to_lowercase());
@@ -1540,7 +1564,7 @@ impl Dock {
                 if let Some(path) = self.bar_path(&layout) {
                     // Midnight at 80%; solid once it is a full-width strip, so a
                     // game or the wallpaper behind it never shows through.
-                    let (r, g, b) = SURFACE;
+                    let (r, g, b) = surface();
                     let opacity = lerp(self.settings.opacity, 1.0, self.widen.value.clamp(0.0, 1.0));
                     self.brush.SetColor(&rgba(r, g, b, opacity));
                     rt.FillGeometry(&path, &self.brush, None);
@@ -1595,10 +1619,10 @@ impl Dock {
                             self.fill_rounded(
                                 rect(line.left - g, line.top - g, line.right + g, line.bottom + g),
                                 2.0 * s + g,
-                                rgba(ACCENT.r, ACCENT.g, ACCENT.b, alpha * opacity),
+                                rgba(accent().r, accent().g, accent().b, alpha * opacity),
                             );
                         }
-                        self.fill_rounded(line, 1.5 * s, rgba(ACCENT.r, ACCENT.g, ACCENT.b, opacity));
+                        self.fill_rounded(line, 1.5 * s, rgba(accent().r, accent().g, accent().b, opacity));
                     }
                 }
 
@@ -1966,6 +1990,56 @@ impl Dock {
         Some(self.icon_screen_rect(index))
     }
 
+    /// Pins a running app in Pollen; a Windows pin removed earlier comes back
+    /// instead, if it is the same app.
+    fn pin(&mut self, i: usize) {
+        let Some(launch) = self.items[i].launch.clone() else { return };
+        let mut hidden = settings::hidden_pins();
+        let item = &self.items[i];
+        let windows_pin = apps::read_pins().into_iter().find(|p| {
+            hidden.contains(&p.launch.to_lowercase())
+                && (p.exe.is_some() && p.exe == item.exe
+                    || p.aumid.as_ref().is_some_and(|a| item.aumid.as_ref().is_some_and(|b| a.eq_ignore_ascii_case(b))))
+        });
+        match windows_pin {
+            Some(p) => {
+                hidden.retain(|h| *h != p.launch.to_lowercase());
+                settings::save_hidden_pins(&hidden);
+            }
+            None => {
+                let mut own = settings::own_pins();
+                if !own.iter().any(|o| o.eq_ignore_ascii_case(&launch)) {
+                    own.push(launch);
+                    settings::save_own_pins(&own);
+                }
+            }
+        }
+        self.pins_changed();
+    }
+
+    /// Takes a pin off the dock: Pollen's own pins are forgotten, Windows'
+    /// are hidden from the dock (Windows does not let other apps change them).
+    fn unpin(&mut self, i: usize) {
+        let Some(launch) = self.items[i].launch.clone() else { return };
+        let mut own = settings::own_pins();
+        if own.iter().any(|o| o.eq_ignore_ascii_case(&launch)) {
+            own.retain(|o| !o.eq_ignore_ascii_case(&launch));
+            settings::save_own_pins(&own);
+        } else {
+            let mut hidden = settings::hidden_pins();
+            hidden.push(launch.to_lowercase());
+            settings::save_hidden_pins(&hidden);
+        }
+        self.pins_changed();
+    }
+
+    fn pins_changed(&mut self) {
+        self.reload_pins();
+        self.refresh_windows();
+        self.update_targets();
+        post_all(WM_SYNC_PINS, Some(self.hwnd));
+    }
+
     fn schedule_refresh(&self) {
         unsafe { SetTimer(Some(self.hwnd), TIMER_REFRESH, 120, None) };
     }
@@ -2253,12 +2327,12 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
         Some(Hit::Item(i)) if (&(*dock).items)[i].kind == Kind::App => Some(i),
         _ => None,
     };
-    let (can_open, running) = match index {
+    let (can_open, running, pinned) = match index {
         Some(i) => {
             let item = &(&(*dock).items)[i];
-            (item.launch.is_some(), !item.windows.is_empty())
+            (item.launch.is_some(), !item.windows.is_empty(), item.pinned)
         }
-        None => (false, false),
+        None => (false, false, false),
     };
 
     let Ok(menu) = CreatePopupMenu() else { return };
@@ -2267,6 +2341,11 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
     }
     if running {
         let _ = AppendMenuW(menu, MF_STRING, CMD_CLOSE, w!("Pencereleri kapat"));
+    }
+    if can_open && pinned {
+        let _ = AppendMenuW(menu, MF_STRING, CMD_UNPIN, w!("Dock'tan kaldır"));
+    } else if can_open {
+        let _ = AppendMenuW(menu, MF_STRING, CMD_PIN, w!("Dock'a sabitle"));
     }
     if can_open || running {
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
@@ -2281,6 +2360,7 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
     let mut cursor = POINT::default();
     let _ = GetCursorPos(&mut cursor);
     let _ = SetForegroundWindow(hwnd);
+    (*dock).menu_open = true;
     let command = TrackPopupMenu(
         menu,
         TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_CENTERALIGN,
@@ -2295,6 +2375,12 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
 
     // The menu ran its own message loop; take a fresh reference.
     let dock = &mut *dock;
+    dock.menu_open = false;
+    if dock.mouse.is_none() && dock.settings.dock_mode != DockMode::Fixed {
+        // Hide after the usual pause, unless the mouse comes back.
+        dock.lingering = true;
+        SetTimer(Some(hwnd), TIMER_HIDE, HIDE_DELAY_MS, None);
+    }
     match (command.0 as usize, index) {
         (CMD_OPEN, Some(i)) if i < dock.items.len() => dock.launch(i),
         (CMD_CLOSE, Some(i)) if i < dock.items.len() => {
@@ -2302,6 +2388,8 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
             shell::close(&windows);
             dock.schedule_refresh();
         }
+        (CMD_PIN, Some(i)) if i < dock.items.len() => dock.pin(i),
+        (CMD_UNPIN, Some(i)) if i < dock.items.len() => dock.unpin(i),
         (CMD_MODE_FIXED, _) => dock.set_mode(DockMode::Fixed),
         (CMD_MODE_SMART, _) => dock.set_mode(DockMode::Smart),
         (CMD_MODE_PEEK, _) => dock.set_mode(DockMode::Peek),
@@ -2367,6 +2455,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         if dock.is_main() {
             taskbar::hide();
             taskbar::watch();
+            crate::appicon::add(hwnd, WM_TRAYICON);
         }
         dock.appbar_registered = false;
         dock.apply_mode();
@@ -2464,6 +2553,28 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             (*ptr).activate(Hit::Tray);
             LRESULT(0)
         }
+        WM_TRAYICON => {
+            // Version 4: the event is in lparam's low word.
+            match (lparam.0 & 0xFFFF) as u32 {
+                // NIN_SELECT, NIN_KEYSELECT: a left click or Enter.
+                0x0400 | 0x0401 => crate::notch::show_settings(),
+                // WM_CONTEXTMENU: a right click.
+                0x007B => {
+                    let enabled = crate::autostart::is_enabled();
+                    match crate::appicon::menu(hwnd, enabled) {
+                        crate::appicon::CMD_SETTINGS => crate::notch::show_settings(),
+                        crate::appicon::CMD_AUTOSTART => {
+                            crate::autostart::set(!enabled);
+                            crate::notch::settings_changed();
+                        }
+                        crate::appicon::CMD_QUIT => quit(),
+                        _ => {}
+                    }
+                }
+                _ => {}
+            }
+            LRESULT(0)
+        }
         WM_SYNC_REFRESH => {
             (*ptr).schedule_refresh();
             LRESULT(0)
@@ -2530,6 +2641,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 // A monitor may have come or gone.
                 sync_screens();
             }
+            if msg == WM_SETTINGCHANGE && main && settings::get().theme == settings::Theme::Windows {
+                // Windows' accent color may have changed.
+                settings::refresh_palette();
+                settings_changed();
+                crate::notch::settings_changed();
+            }
             if msg == WM_DPICHANGED {
                 LRESULT(0)
             } else {
@@ -2556,6 +2673,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 for other in others {
                     let _ = DestroyWindow(other.hwnd);
                 }
+                crate::appicon::remove(hwnd);
                 DOCK_HWND.store(0, Ordering::Relaxed);
                 PostQuitMessage(0);
             }

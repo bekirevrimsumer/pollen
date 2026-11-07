@@ -1,6 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod anim;
+mod appicon;
+mod autostart;
 mod apps;
 mod controls;
 mod dock;

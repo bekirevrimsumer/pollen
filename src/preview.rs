@@ -69,7 +69,6 @@ const TIMER_HIDE: usize = 1;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 const ICON_CLOSE: char = '\u{E8BB}';
 
-const SURFACE: (f32, f32, f32) = (9.0 / 255.0, 12.0 / 255.0, 20.0 / 255.0);
 
 static PREVIEW_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -126,6 +125,11 @@ struct Preview {
 
 fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
+}
+
+/// The theme's background color.
+fn surface() -> (f32, f32, f32) {
+    crate::settings::palette().surface
 }
 
 fn rect(left: f32, top: f32, right: f32, bottom: f32) -> D2D_RECT_F {
@@ -583,7 +587,7 @@ impl Preview {
             self.brush.SetColor(&rgba(0.0, 0.0, 0.0, 1.0 / 255.0));
             rt.FillRectangle(&rect(w * 0.3, card.bottom, w * 0.7, h), &self.brush);
 
-            let (r, g, b) = SURFACE;
+            let (r, g, b) = surface();
             let opacity = (settings::get().opacity + 0.05).min(1.0);
             self.fill_rounded(card, RADIUS * s, rgba(r, g, b, opacity * a));
             self.brush.SetColor(&white(0.12));

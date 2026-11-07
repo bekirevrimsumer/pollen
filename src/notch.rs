@@ -84,9 +84,6 @@ const WINDOW_WIDTH: f32 = OPEN_WIDTH + FLARE * 2.0 + 24.0;
 const WINDOW_HEIGHT: f32 = 420.0;
 
 /// Nectar's Midnight surface; it gets more opaque open (Nectar: +0.12).
-const SURFACE: (f32, f32, f32) = (9.0 / 255.0, 12.0 / 255.0, 20.0 / 255.0);
-const ACCENT: D2D1_COLOR_F = rgba(0.478, 0.635, 1.0, 1.0);
-const ON_ACCENT: D2D1_COLOR_F = rgba(0.04, 0.06, 0.12, 1.0);
 
 const TIMER_COLLAPSE: usize = 1;
 const TIMER_CLOCK: usize = 2;
@@ -124,6 +121,8 @@ const WM_PRIVACY: u32 = WM_APP + 10;
 const WM_VOLUME: u32 = WM_APP + 11;
 /// A new default output.
 const WM_AUDIO_DEVICE: u32 = WM_APP + 12;
+/// Open on the Settings tab (the tray icon).
+const WM_SHOW_SETTINGS: u32 = WM_APP + 13;
 /// iOS's colors: orange for the microphone, green for the camera.
 const MIC_COLOR: D2D1_COLOR_F = rgba(1.0, 0.62, 0.04, 1.0);
 const CAMERA_COLOR: D2D1_COLOR_F = rgba(0.19, 0.82, 0.35, 1.0);
@@ -168,6 +167,7 @@ const ICON_ZOOM: char = '\u{E71E}';
 const ICON_COLOR: char = '\u{E790}';
 const ICON_POWER: char = '\u{E7E8}';
 const ICON_PLACE: char = '\u{E81D}';
+const ICON_THEME: char = '\u{E771}';
 const ICON_CLOCK: char = '\u{E823}';
 const ICON_INFO: char = '\u{E946}';
 // Segoe Fluent Icons has no rain or snow; DirectWrite falls back to Segoe UI Symbol.
@@ -185,6 +185,22 @@ static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
 
 const fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
+}
+
+/// The theme's background color.
+fn surface() -> (f32, f32, f32) {
+    crate::settings::palette().surface
+}
+
+/// The theme's accent: what is selected or on.
+fn accent() -> D2D1_COLOR_F {
+    let (r, g, b) = crate::settings::palette().accent;
+    rgba(r, g, b, 1.0)
+}
+
+fn on_accent() -> D2D1_COLOR_F {
+    let (r, g, b) = crate::settings::palette().on_accent;
+    rgba(r, g, b, 1.0)
 }
 
 fn with_alpha(c: D2D1_COLOR_F, a: f32) -> D2D1_COLOR_F {
@@ -265,16 +281,18 @@ enum Choice {
     Mode,
     Size,
     Magnify,
+    Autostart,
 }
 
 impl Choice {
-    const ALL: [Choice; 3] = [Choice::Mode, Choice::Size, Choice::Magnify];
+    const ALL: [Choice; 4] = [Choice::Mode, Choice::Size, Choice::Magnify, Choice::Autostart];
 
     fn icon(self) -> char {
         match self {
             Choice::Mode => ICON_PIN,
             Choice::Size => ICON_SIZE,
             Choice::Magnify => ICON_ZOOM,
+            Choice::Autostart => ICON_POWER,
         }
     }
 
@@ -283,22 +301,26 @@ impl Choice {
             Choice::Mode => "Dock modu",
             Choice::Size => "Dock boyutu",
             Choice::Magnify => "Büyütme",
+            Choice::Autostart => "Windows ile aç",
         }
     }
 
-    fn options(self) -> [&'static str; 3] {
+    fn options(self) -> Vec<&'static str> {
         match self {
-            Choice::Mode => DockMode::ALL.map(|m| m.label()),
-            Choice::Size => DockSize::ALL.map(|m| m.label()),
-            Choice::Magnify => Magnify::ALL.map(|m| m.label()),
+            Choice::Mode => DockMode::ALL.map(|m| m.label()).to_vec(),
+            Choice::Size => DockSize::ALL.map(|m| m.label()).to_vec(),
+            Choice::Magnify => Magnify::ALL.map(|m| m.label()).to_vec(),
+            Choice::Autostart => vec!["Kapalı", "Açık"],
         }
     }
 
-    fn selected(self, s: &Settings) -> usize {
+    /// `autostart` is read from the registry, not kept in the settings.
+    fn selected(self, s: &Settings, autostart: bool) -> usize {
         match self {
             Choice::Mode => DockMode::ALL.iter().position(|m| *m == s.dock_mode),
             Choice::Size => DockSize::ALL.iter().position(|m| *m == s.dock_size),
             Choice::Magnify => Magnify::ALL.iter().position(|m| *m == s.magnify),
+            Choice::Autostart => Some(autostart as usize),
         }
         .unwrap_or(0)
     }
@@ -308,6 +330,7 @@ impl Choice {
             Choice::Mode => s.dock_mode = DockMode::ALL[i],
             Choice::Size => s.dock_size = DockSize::ALL[i],
             Choice::Magnify => s.magnify = Magnify::ALL[i],
+            Choice::Autostart => {}
         }
     }
 }
@@ -339,6 +362,8 @@ enum Control {
     SliderIcon(Slider),
     /// One option of a Settings row.
     Choice(Choice, usize),
+    /// A theme's swatch.
+    Theme(usize),
     Quit,
     /// The weather's place: click to type a city.
     CityField,
@@ -415,6 +440,8 @@ pub struct Notch {
     date: String,
     output: Option<audio::Output>,
     settings: Settings,
+    /// Whether Windows starts Pollen (the registry's word, re-read on change).
+    autostart: bool,
     /// The shown player's mixer volume, while it has a sound session.
     app_volume: Option<audio::AppVolume>,
     internet: bool,
@@ -539,6 +566,7 @@ impl Notch {
                 date: String::new(),
                 output: None,
                 settings: settings::get(),
+                autostart: crate::autostart::is_enabled(),
                 app_volume: None,
                 internet: false,
                 radios: network::Radios::default(),
@@ -879,7 +907,8 @@ impl Notch {
             }
             CALENDAR_TAB => return PAD * 0.7 + 28.0 + 6.0 + 18.0 + 6.0 * 28.0 + PAD * 0.6,
             SETTINGS_TAB => {
-                let rows = Choice::ALL.len() as f32 + 1.0;
+                // The choices, the weather's place and the theme.
+                let rows = Choice::ALL.len() as f32 + 2.0;
                 return PAD * 0.7
                     + rows * (CHOICE_HEIGHT + 10.0)
                     + self.city_list_height()
@@ -1062,6 +1091,16 @@ impl Notch {
                 }
             }
             y += (self.city_list_height() + 4.0) * s;
+            // Theme swatches, spread across.
+            let n = settings::Theme::ALL.len() as f32;
+            let d = 20.0 * s;
+            let gap = ((right - x0) - n * d) / (n - 1.0);
+            for i in 0..settings::Theme::ALL.len() {
+                let x = x0 + i as f32 * (d + gap);
+                let top = y + (CHOICE_HEIGHT * s - d) / 2.0;
+                list.push((rect(x, top, x + d, top + d), Control::Theme(i)));
+            }
+            y += (CHOICE_HEIGHT + 10.0) * s;
             let icon = rect(left, y, left + 18.0 * s, y + SLIDER_HEIGHT * s);
             list.push((icon, Control::SliderIcon(Slider::Opacity)));
             list.push((rect(x0, y, right - 40.0 * s, y + SLIDER_HEIGHT * s), Control::Slider(Slider::Opacity)));
@@ -1433,7 +1472,7 @@ impl Notch {
             rt.BeginDraw();
             rt.Clear(Some(&if self.headless { rgba(0.32, 0.40, 0.52, 1.0) } else { rgba(0.0, 0.0, 0.0, 0.0) }));
             if let Some(path) = self.island_path(island, top_radius, bottom_radius, flare) {
-                let (r, g, b) = SURFACE;
+                let (r, g, b) = surface();
                 let base = self.settings.opacity;
                 self.brush.SetColor(&rgba(r, g, b, lerp(base, (base + 0.07).min(1.0), o)));
                 rt.FillGeometry(&path, &self.brush, None);
@@ -1527,7 +1566,7 @@ impl Notch {
         for (i, level) in self.bars.iter().enumerate() {
             let h = 3.0 * s + level.clamp(0.0, 1.0) * 13.0 * s;
             let x = x0 + i as f32 * (w + gap);
-            self.fill_rounded(rect(x, cy - h / 2.0, x + w, cy + h / 2.0), w / 2.0, with_alpha(ACCENT, alpha));
+            self.fill_rounded(rect(x, cy - h / 2.0, x + w, cy + h / 2.0), w / 2.0, with_alpha(accent(), alpha));
         }
     }
 
@@ -1601,7 +1640,7 @@ impl Notch {
                     self.fill_rounded(bar, 2.0 * s, white(0.12));
                     let fill = rect(bar.left, bar.top, bar.left + (bar.right - bar.left) * f.clamp(0.0, 1.0), bar.bottom);
                     if fill.right - fill.left > 0.5 {
-                        let color = if *f > 0.9 { rgba(1.0, 0.45, 0.4, alpha) } else { with_alpha(ACCENT, alpha) };
+                        let color = if *f > 0.9 { rgba(1.0, 0.45, 0.4, alpha) } else { with_alpha(accent(), alpha) };
                         self.fill_rounded(fill, 2.0 * s, color);
                     }
                 }
@@ -1701,7 +1740,7 @@ impl Notch {
             self.fill_rounded(track, 2.0 * s, white(0.10));
             let at = |v: f64| bar_left + (bar_right - bar_left) * ((v - lowest) / span) as f32;
             let fill = rect(at(d.low), track.top, at(d.high).max(at(d.low) + 4.0 * s), track.bottom);
-            self.fill_rounded(fill, 2.0 * s, with_alpha(ACCENT, alpha));
+            self.fill_rounded(fill, 2.0 * s, with_alpha(accent(), alpha));
         }
     }
 
@@ -1734,6 +1773,12 @@ impl Notch {
             }
         }
         y += (self.city_list_height() + 4.0) * s;
+        let cy = y + CHOICE_HEIGHT * s / 2.0;
+        self.icon(ICON_THEME, &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), white(0.8));
+        let title = format!("Tema · {}", self.settings.theme.label());
+        let (_, th) = self.text_size(&title, &self.title_format);
+        self.text(&title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
+        y += (CHOICE_HEIGHT + 10.0) * s;
         y += (SLIDER_HEIGHT + 16.0) * s;
         let note = "Ayarlar kendiliğinden kaydedilir";
         let (_, nh) = self.text_size(note, &self.small_format);
@@ -1798,10 +1843,10 @@ impl Notch {
                 let (w, h) = self.text_size(&text, &self.title_format);
                 if today {
                     let r = 12.0 * s;
-                    self.fill_rounded(rect(cx - r, cy - r, cx + r, cy + r), r, with_alpha(ACCENT, alpha));
+                    self.fill_rounded(rect(cx - r, cy - r, cx + r, cy + r), r, with_alpha(accent(), alpha));
                 }
                 let color = if today {
-                    with_alpha(ON_ACCENT, alpha)
+                    with_alpha(on_accent(), alpha)
                 } else if !inside {
                     white(0.22)
                 } else if col >= 5 {
@@ -1979,7 +2024,7 @@ impl Notch {
                     );
                     if button == MediaButton::PlayPause {
                         self.fill_rounded(b, (b.right - b.left) / 2.0, white(if hot { 1.0 } else { 0.92 }));
-                        self.icon(glyph, format, b, with_alpha(ON_ACCENT, alpha));
+                        self.icon(glyph, format, b, with_alpha(on_accent(), alpha));
                     } else {
                         if hot {
                             self.fill_rounded(b, (b.right - b.left) / 2.0, white(0.10));
@@ -2005,7 +2050,7 @@ impl Notch {
                         self.fill_rounded(
                             rect(mid - 7.0 * s, r.bottom - 5.0 * s, mid + 7.0 * s, r.bottom - 2.0 * s),
                             1.5 * s,
-                            with_alpha(ACCENT, alpha),
+                            with_alpha(accent(), alpha),
                         );
                     }
                 }
@@ -2044,9 +2089,34 @@ impl Notch {
                     self.text(&name, &self.title_format, pt(x, (r.top + r.bottom - nh) / 2.0), white(0.9), limit);
                 }
                 Control::Slider(slider) => self.draw_slider(r, &slider, hovered == Some(Control::Slider(slider.clone())), alpha),
+                Control::Theme(i) => {
+                    let theme = settings::Theme::ALL[i];
+                    let palette = theme.palette();
+                    let selected = self.settings.theme == theme;
+                    let hot = hovered == Some(Control::Theme(i));
+                    let d = r.right - r.left;
+                    if selected || hot {
+                        let ring = rect(r.left - 3.0 * s, r.top - 3.0 * s, r.right + 3.0 * s, r.bottom + 3.0 * s);
+                        unsafe {
+                            self.brush.SetColor(&white(if selected { 0.9 } else { 0.35 }));
+                            self.surface.rt.DrawRoundedRectangle(
+                                &D2D1_ROUNDED_RECT { rect: ring, radiusX: d / 2.0 + 3.0 * s, radiusY: d / 2.0 + 3.0 * s },
+                                &self.brush,
+                                1.5 * s,
+                                None,
+                            );
+                        }
+                    }
+                    // The accent around a dot of the background tint.
+                    let (ar, ag, ab) = palette.accent;
+                    self.fill_rounded(r, d / 2.0, rgba(ar, ag, ab, alpha));
+                    let (sr, sg, sb) = palette.surface;
+                    let inner = rect(r.left + 5.0 * s, r.top + 5.0 * s, r.right - 5.0 * s, r.bottom - 5.0 * s);
+                    self.fill_rounded(inner, d / 2.0 - 5.0 * s, rgba(sr, sg, sb, alpha));
+                }
                 Control::Choice(choice, i) => {
                     let n = choice.options().len();
-                    let selected = choice.selected(&self.settings) == i;
+                    let selected = choice.selected(&self.settings, self.autostart) == i;
                     let hot = hovered == Some(Control::Choice(choice, i));
                     let radius = (r.bottom - r.top) / 2.0;
                     // The row's track once, behind its first option.
@@ -2056,13 +2126,13 @@ impl Notch {
                     }
                     let inner = rect(r.left + 2.0 * s, r.top + 2.0 * s, r.right - 2.0 * s, r.bottom - 2.0 * s);
                     if selected {
-                        self.fill_rounded(inner, radius - 2.0 * s, with_alpha(ACCENT, alpha));
+                        self.fill_rounded(inner, radius - 2.0 * s, with_alpha(accent(), alpha));
                     } else if hot {
                         self.fill_rounded(inner, radius - 2.0 * s, white(0.08));
                     }
                     let label = choice.options()[i];
                     let (lw, lh) = self.text_size(label, &self.title_format);
-                    let color = if selected { with_alpha(ON_ACCENT, alpha) } else { white(if hot { 0.95 } else { 0.7 }) };
+                    let color = if selected { with_alpha(on_accent(), alpha) } else { white(if hot { 0.95 } else { 0.7 }) };
                     self.text(label, &self.title_format, pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0), color, lw + 4.0);
                 }
                 Control::CityField => {
@@ -2073,7 +2143,7 @@ impl Notch {
                     if editing {
                         let edge = rect(r.left + 0.75 * s, r.top + 0.75 * s, r.right - 0.75 * s, r.bottom - 0.75 * s);
                         unsafe {
-                            self.brush.SetColor(&with_alpha(ACCENT, alpha));
+                            self.brush.SetColor(&with_alpha(accent(), alpha));
                             self.surface.rt.DrawRoundedRectangle(
                                 &D2D1_ROUNDED_RECT { rect: edge, radiusX: radius, radiusY: radius },
                                 &self.brush,
@@ -2094,7 +2164,7 @@ impl Notch {
                                 self.text(&edit.text, &self.title_format, pt(x, cy - th / 2.0), white(0.95), r.right - x - 8.0 * s);
                             }
                             let cx = (x + tw + 1.0 * s).min(r.right - 10.0 * s);
-                            self.fill_rounded(rect(cx, cy - 7.0 * s, cx + 1.5 * s, cy + 7.0 * s), 0.75 * s, with_alpha(ACCENT, alpha));
+                            self.fill_rounded(rect(cx, cy - 7.0 * s, cx + 1.5 * s, cy + 7.0 * s), 0.75 * s, with_alpha(accent(), alpha));
                         }
                         None => {
                             let label = match (&self.place, &self.weather) {
@@ -2198,13 +2268,13 @@ impl Notch {
         let lift = if hot && !pressed { 0.5 * s } else { 0.0 };
         let r = rect(r.left, r.top - lift, r.right, r.bottom - lift);
         let bg = if on {
-            with_alpha(ACCENT, alpha * if hot { 0.9 } else { 1.0 })
+            with_alpha(accent(), alpha * if hot { 0.9 } else { 1.0 })
         } else {
             rgba(1.0, 1.0, 1.0, (if hot { 0.08 } else { 0.04 }) * alpha)
         };
         self.fill_rounded(r, 11.0 * s, bg);
-        let fg = if on { with_alpha(ON_ACCENT, alpha) } else { rgba(1.0, 1.0, 1.0, 0.9 * alpha) };
-        let muted = if on { rgba(ON_ACCENT.r, ON_ACCENT.g, ON_ACCENT.b, 0.6 * alpha) } else { rgba(1.0, 1.0, 1.0, 0.45 * alpha) };
+        let fg = if on { with_alpha(on_accent(), alpha) } else { rgba(1.0, 1.0, 1.0, 0.9 * alpha) };
+        let muted = if on { rgba(on_accent().r, on_accent().g, on_accent().b, 0.6 * alpha) } else { rgba(1.0, 1.0, 1.0, 0.45 * alpha) };
         let circle = rect(r.left + 10.0 * s, r.top + 9.0 * s, r.left + 34.0 * s, r.top + 33.0 * s);
         self.fill_rounded(
             circle,
@@ -2494,6 +2564,18 @@ impl Notch {
                 }
                 self.refresh_app_volume();
             }
+            Control::Theme(i) => {
+                let mut settings = self.settings;
+                settings.theme = settings::Theme::ALL[i];
+                if settings != self.settings {
+                    self.settings = settings;
+                    settings::set(settings, true);
+                }
+            }
+            Control::Choice(Choice::Autostart, i) => {
+                crate::autostart::set(i == 1);
+                self.autostart = crate::autostart::is_enabled();
+            }
             Control::Choice(choice, i) => {
                 let mut settings = self.settings;
                 choice.select(&mut settings, i);
@@ -2640,6 +2722,15 @@ impl Notch {
             latitude: 0.0,
             longitude: 0.0,
         };
+        // Another theme.
+        let mut ocean = settings::get();
+        ocean.theme = settings::Theme::Ocean;
+        settings::set(ocean, false);
+        notch.settings = ocean;
+        notch.render();
+        save(&notch, "2j-theme-ocean");
+        settings::use_defaults();
+        notch.settings = settings::get();
         notch.privacy = privacy::InUse { microphone: vec!["Discord".into()], camera: vec!["Zen".into()] };
         notch.privacy_room = Spring::new(1.0);
         notch.render();
@@ -2827,6 +2918,11 @@ fn post(message: u32) {
     }
 }
 
+/// Opens the notch on its Settings tab (the tray icon's click).
+pub fn show_settings() {
+    post(WM_SHOW_SETTINGS);
+}
+
 /// Tells the notch to pick up changed settings.
 pub fn settings_changed() {
     post(WM_SETTINGS_CHANGED);
@@ -2966,9 +3062,26 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             (*ptr).on_places();
             LRESULT(0)
         }
+        WM_SHOW_SETTINGS => {
+            let notch = &mut *ptr;
+            if !notch.hidden_for_fullscreen {
+                notch.autostart = crate::autostart::is_enabled();
+                notch.set_open(true);
+                notch.tab = SETTINGS_TAB;
+                notch.update_stats_timer();
+                notch.sync_panel_height(false);
+                // Closes on its own if the mouse never comes.
+                if !notch.hovered {
+                    SetTimer(Some(hwnd), TIMER_COLLAPSE, 6000, None);
+                }
+                notch.render();
+            }
+            LRESULT(0)
+        }
         WM_SETTINGS_CHANGED => {
             let notch = &mut *ptr;
             notch.settings = settings::get();
+            notch.autostart = crate::autostart::is_enabled();
             notch.render();
             LRESULT(0)
         }

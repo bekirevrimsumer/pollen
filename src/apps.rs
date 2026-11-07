@@ -191,6 +191,27 @@ fn is_explorer_pin(lnk: &Path) -> bool {
 }
 
 /// The taskbar pins, in the order Explorer shows them.
+/// A pin made in Pollen, from what it launches: a program's path or
+/// `shell:AppsFolder\<AUMID>`.
+pub fn pin_for(launch: &str) -> Pin {
+    match launch.strip_prefix("shell:AppsFolder\\").or_else(|| launch.strip_prefix("shell:appsfolder\\")) {
+        Some(aumid) => Pin {
+            name: shell_display_name(launch).unwrap_or_else(|| aumid.to_string()),
+            launch: launch.to_string(),
+            exe: None,
+            aumid: Some(aumid.to_string()),
+        },
+        None => Pin {
+            name: exe_description(launch).unwrap_or_else(|| {
+                Path::new(launch).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()
+            }),
+            launch: launch.to_string(),
+            exe: Some(launch.to_lowercase()),
+            aumid: None,
+        },
+    }
+}
+
 pub fn read_pins() -> Vec<Pin> {
     let blob = taskband_favorites();
     let mut keyed: Vec<(usize, SystemTime, Pin)> = Vec::new();
