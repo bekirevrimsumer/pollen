@@ -1,7 +1,7 @@
 # Pollen
 
 A lightweight native dock for Windows that replaces the taskbar, written in Rust with
-Direct2D. No WebView, no GPU device, no background polling: about 12 MB in Task Manager.
+Direct2D. No WebView, no GPU device, no background polling: about 16 MB in Task Manager.
 
 > Working name. Early stage: dock only, primary monitor only.
 
@@ -13,7 +13,7 @@ Direct2D. No WebView, no GPU device, no background polling: about 12 MB in Task 
 - Animations run in step with the display's refresh rate (144 fps on a 144 Hz screen)
 - Nectar's motion: hiding shrinks the bar into a circle that sinks below the edge;
   showing raises the circle, flattens it against the edge and spreads it into the bar
-- Three modes (right-click the dock), saved in `%APPDATA%\Pollen\settings.txt`:
+- Three modes (right-click the dock, or the notch's Settings tab):
   - **Sabit (Fixed):** always visible, reserves its strip. While a window is
     maximized or snapped down to it, the bar widens to the full screen width, so the
     strip never shows bare wallpaper beside the bar
@@ -41,11 +41,24 @@ Direct2D. No WebView, no GPU device, no background polling: about 12 MB in Task 
   Music if something plays, else on the Control Center
 - Music: what Windows' media sessions report (Spotify, browsers, players): art,
   title, artist, player, a progress bar to seek, previous / play-pause / next, and
-  a picker when several players have sessions. Event driven; position-only
+  a picker when several players have sessions, and a slider for the player's own
+  volume in the Windows mixer (for a browser that is the whole browser, not one tab). Event driven; position-only
   updates (sent about every second by live streams) get a light read
 - Control Center: network and sound-output tiles (Wi-Fi / Bluetooth tiles when the
   computer has them), shortcut buttons, and sliders for the volume and for each
   monitor's brightness separately over DDC/CI (Nectar changed all monitors at once)
+- Status: the weather (city, condition, today's high and low), CPU, memory, free
+  space on C: and network speed. When nothing plays, the closed island shows the
+  weather on the left, the time in the middle and the date on the right
+- Calendar: a plain month view (Monday first), today highlighted, previous / next
+  month. No accounts or calendar sync
+- Settings: the dock's mode, size and magnification, the background opacity of
+  the dock and the notch, and quitting Pollen. Changes apply at once and are saved
+  in `%APPDATA%\Pollen\settings.txt`
+
+The weather comes from [Open-Meteo](https://open-meteo.com/) for a rough location
+looked up from the computer's public IP address (ipwho.is, falling back to
+geojs.io), refreshed every 30 minutes. Choosing a city by hand is still to come.
 
 ## Getting the taskbar back
 
@@ -59,8 +72,7 @@ pollen.exe --restore-taskbar
 ## Not yet
 
 - Monitors other than the primary
-- Window previews, drag to reorder, settings window
-- The notch's Status and Calendar tabs
+- Window previews, drag to reorder, choosing the weather's city
 
 ## Build
 
@@ -75,7 +87,7 @@ Debug helpers (use a debug build, which has a console):
 - `pollen.exe --snapshot <folder>` renders the dock's and the notch's animations to
   PNG files without showing anything on screen.
 - `pollen.exe --controls` prints the sound output, network, monitors and their
-  brightness as the Control Center sees them.
+  brightness, the media sessions, system use and the weather as the notch sees them.
 
 ## Credits and license
 

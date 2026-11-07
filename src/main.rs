@@ -59,13 +59,26 @@ fn main() -> Result<()> {
                     t.duration_ms,
                     t.art.as_ref().map(|a| (a.width, a.height))
                 );
+                println!("  app id {:?}, mixer volume {:?}", t.app, controls::audio::app_volume(&t.app, &t.app_name));
             }
+            let mut sampler = controls::system::Sampler::new();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            println!("system: {:?}", sampler.sample());
+            let place = std::thread::spawn(|| {
+                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                controls::weather::check()
+            })
+            .join()
+            .ok()
+            .flatten();
+            println!("weather: {place:?}");
             let mut meter = controls::audio::Meter::new();
             println!("peaks: {:?}", meter.peaks());
             return Ok(());
         }
         if let Some(i) = args.iter().position(|a| a == "--snapshot") {
             let dir = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
+            settings::use_defaults();
             return dock::Dock::snapshot(&dir);
         }
         if args.iter().any(|a| a == "--restore-taskbar") {

@@ -89,7 +89,6 @@ const TILE: f32 = 36.0;
 /// Share of the box the visible part of an icon fills (Nectar's icon-only look:
 /// 30 px icons in 36 px slots, no tile behind them).
 const ICON_FILL: f32 = 0.83;
-const MAX_SCALE: f32 = 1.5;
 /// How many neighboring icons the magnification reaches.
 const REACH: f32 = 2.4;
 const GAP: f32 = 12.0;
@@ -111,9 +110,8 @@ const CLOCK_PAD: f32 = 6.0;
 const HIDE_DELAY_MS: u32 = 800;
 
 /// Nectar's "Midnight" theme: hsl(#5e8bff's hue, 40%, 10%) = #0f1524.
-const SURFACE: (f32, f32, f32) = (15.0 / 255.0, 21.0 / 255.0, 36.0 / 255.0);
+const SURFACE: (f32, f32, f32) = (9.0 / 255.0, 12.0 / 255.0, 20.0 / 255.0);
 /// Nectar's default (and "solid" style) background opacity.
-const SURFACE_OPACITY: f32 = 0.80;
 /// The accent / highlight color the theme was used with.
 const ACCENT: D2D1_COLOR_F = rgba(0.478, 0.635, 1.0, 1.0);
 
@@ -134,6 +132,8 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 const WM_APPBAR: u32 = WM_APP + 1;
 /// Testing aid: presses the tray button as if clicked (`PostMessage` from a script).
 const WM_PRESS_TRAY: u32 = WM_APP + 9;
+/// The settings changed (`settings::set`).
+const WM_SETTINGS_CHANGED: u32 = WM_APP + 10;
 const ABN_POSCHANGED: usize = 1;
 const ABN_FULLSCREENAPP: usize = 2;
 
@@ -149,6 +149,27 @@ const HSHELL_RUDEAPPACTIVATED: usize = 0x8004;
 
 /// The dock window, for the WinEvent callback (which gets no context pointer).
 static DOCK_HWND: AtomicIsize = AtomicIsize::new(0);
+
+/// Quits Pollen (the notch's Settings tab): closing the dock restores the
+/// taskbar and ends the message loop.
+pub fn quit() {
+    let hwnd = DOCK_HWND.load(Ordering::Relaxed);
+    if hwnd != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), windows::Win32::UI::WindowsAndMessaging::WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// Tells the dock to pick up changed settings.
+pub fn settings_changed() {
+    let hwnd = DOCK_HWND.load(Ordering::Relaxed);
+    if hwnd != 0 {
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_SETTINGS_CHANGED, WPARAM(0), LPARAM(0));
+        }
+    }
+}
 
 const fn rgba(r: f32, g: f32, b: f32, a: f32) -> D2D1_COLOR_F {
     D2D1_COLOR_F { r, g, b, a }
@@ -408,7 +429,7 @@ impl Dock {
             let brush = surface.rt.CreateSolidColorBrush(&rgba(1.0, 1.0, 1.0, 1.0), None)?;
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
 
-            let settings = if headless { Settings { dock_mode: DockMode::Fixed } } else { settings::load() };
+            let settings = if headless { Settings::default() } else { settings::get() };
             let mut dock = Box::new(Dock {
                 hwnd,
                 factory,
@@ -583,15 +604,39 @@ impl Dock {
     }
 
     fn set_mode(&mut self, mode: DockMode) {
-        if self.settings.dock_mode == mode {
+        let mut s = settings::get();
+        if s.dock_mode != mode {
+            s.dock_mode = mode;
+            settings::set(s, true);
+        }
+    }
+
+    /// The hovered icon's scale.
+    fn max_scale(&self) -> f32 {
+        self.settings.magnify.scale()
+    }
+
+    /// Picks up changed settings, from the notch's Settings tab or the menu.
+    fn reload_settings(&mut self) {
+        if self.headless {
             return;
         }
-        self.settings.dock_mode = mode;
-        settings::save(&self.settings);
-        self.apply_mode();
+        let new = settings::get();
+        let old = std::mem::replace(&mut self.settings, new);
+        if old.dock_size != new.dock_size || old.magnify != new.magnify {
+            // Re-measure everything and fetch the icons at the new size.
+            self.scale = 0.0;
+            self.place();
+            self.update_appbar(true);
+            self.update_targets();
+        }
+        if old.dock_mode != new.dock_mode {
+            self.apply_mode();
+            self.update_visibility();
+        }
         self.update_window_state();
-        self.update_visibility();
         self.start_animation();
+        self.render();
     }
 
     /// Bottom of the primary monitor, full width.
@@ -602,7 +647,7 @@ impl Dock {
             let _ = GetMonitorInfoW(monitor, &mut info);
             let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
             let _ = GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
-            let scale = dpi_x as f32 / 96.0;
+            let scale = dpi_x as f32 / 96.0 * self.settings.dock_size.factor();
             if (scale - self.scale).abs() > f32::EPSILON {
                 self.scale = scale;
                 self.icon_cache.clear();
@@ -622,7 +667,7 @@ impl Dock {
             self.update_appbar(false);
 
             let extra = if self.tall { OPENING_DROP } else { 0.0 };
-            let height = ((BAR_HEIGHT + TILE * (MAX_SCALE - 1.0) + LABEL_SPACE + 12.0 + extra) * self.scale).ceil() as i32;
+            let height = ((BAR_HEIGHT + TILE * (self.max_scale() - 1.0) + LABEL_SPACE + 12.0 + extra) * self.scale).ceil() as i32;
             let width = self.monitor.right - self.monitor.left;
             self.origin = (self.monitor.left, self.monitor.bottom - height);
             let _ = self.surface.resize(width, height);
@@ -742,7 +787,7 @@ impl Dock {
     // ---- items -------------------------------------------------------------
 
     fn icon_pixels(&self) -> i32 {
-        (TILE * MAX_SCALE * ICON_FILL * self.scale * 1.25).ceil() as i32
+        (TILE * self.max_scale() * ICON_FILL * self.scale * 1.25).ceil() as i32
     }
 
     fn load_icon(&mut self, index: usize) {
@@ -1052,13 +1097,14 @@ impl Dock {
     fn update_targets(&mut self) {
         let base = self.layout(false);
         let pitch = (TILE + GAP) * self.scale;
+        let max_scale = self.max_scale();
         let interactive = self.interactive();
         for (item, slot) in self.items.iter_mut().zip(base.slots.iter()) {
             item.scale.target = match self.mouse {
                 Some((mx, _)) if interactive => {
                     let distance = (mx - (slot.x + slot.size / 2.0)).abs() / pitch;
                     let t = if distance < REACH { ((PI * distance / REACH).cos() + 1.0) / 2.0 } else { 0.0 };
-                    1.0 + (MAX_SCALE - 1.0) * t
+                    1.0 + (max_scale - 1.0) * t
                 }
                 _ => 1.0,
             };
@@ -1253,7 +1299,7 @@ impl Dock {
             // icons while hovering, and a thin strip at the screen edge while hidden,
             // so reaching the edge brings the dock back.
             if self.mouse.is_some() && self.interactive() {
-                let top = layout.icon_bottom - TILE * MAX_SCALE * s - 6.0 * s;
+                let top = layout.icon_bottom - TILE * self.max_scale() * s - 6.0 * s;
                 self.fill_rounded(
                     rect(layout.bar.left, top, layout.bar.right, layout.bar.bottom),
                     0.0,
@@ -1273,7 +1319,7 @@ impl Dock {
                     // Midnight at 80%; solid once it is a full-width strip, so a
                     // game or the wallpaper behind it never shows through.
                     let (r, g, b) = SURFACE;
-                    let opacity = lerp(SURFACE_OPACITY, 1.0, self.widen.value.clamp(0.0, 1.0));
+                    let opacity = lerp(self.settings.opacity, 1.0, self.widen.value.clamp(0.0, 1.0));
                     self.brush.SetColor(&rgba(r, g, b, opacity));
                     rt.FillGeometry(&path, &self.brush, None);
                 }
@@ -1386,7 +1432,7 @@ impl Dock {
             let label = if self.label.is_some() { 160.0 * s } else { 0.0 };
             left = left.min(layout.full.left - margin) - label;
             right = right.max(layout.full.right + margin) + label;
-            top = top.min(layout.icon_bottom - TILE * MAX_SCALE * s - LABEL_SPACE * s - 4.0 * s);
+            top = top.min(layout.icon_bottom - TILE * self.max_scale() * s - LABEL_SPACE * s - 4.0 * s);
         }
         if !self.shown {
             // The invisible edge strip.
@@ -2021,6 +2067,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_PRESS_TRAY => {
             (*ptr).activate(Hit::Tray);
+            LRESULT(0)
+        }
+        WM_SETTINGS_CHANGED => {
+            (*ptr).reload_settings();
             LRESULT(0)
         }
         WM_APPBAR => {

@@ -56,14 +56,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::Spring;
-use crate::controls::{audio, displays, media, network};
+use crate::controls::{audio, displays, media, network, system, weather};
 use crate::pacer;
 use crate::render::Surface;
+use crate::settings::{self, DockMode, DockSize, Magnify, Settings};
 use crate::shell;
 
 // Sizes in DIPs (Nectar's CSS pixels), multiplied by the monitor scale.
 const BAR: f32 = 36.0;
 const CLOSED_MIN_WIDTH: f32 = 140.0;
+/// Room for the weather and CPU figures beside the closed island's clock.
+/// Room for the weather on the closed island without music.
+const STATUS_SIDE: f32 = 52.0;
 const OPEN_WIDTH: f32 = 420.0;
 const RADIUS: f32 = 18.0;
 const FLARE: f32 = 13.0;
@@ -80,7 +84,7 @@ const WINDOW_WIDTH: f32 = OPEN_WIDTH + FLARE * 2.0 + 24.0;
 const WINDOW_HEIGHT: f32 = 420.0;
 
 /// Nectar's Midnight surface; it gets more opaque open (Nectar: +0.12).
-const SURFACE: (f32, f32, f32) = (15.0 / 255.0, 21.0 / 255.0, 36.0 / 255.0);
+const SURFACE: (f32, f32, f32) = (9.0 / 255.0, 12.0 / 255.0, 20.0 / 255.0);
 const ACCENT: D2D1_COLOR_F = rgba(0.478, 0.635, 1.0, 1.0);
 const ON_ACCENT: D2D1_COLOR_F = rgba(0.04, 0.06, 0.12, 1.0);
 
@@ -91,6 +95,9 @@ const TIMER_REFRESH: usize = 3;
 const TIMER_LEVEL: usize = 4;
 /// The album art in the open Music tab.
 const ART: f32 = 76.0;
+/// CPU / memory / disk / network readings: every second in the Status tab,
+/// every few seconds for the closed island's CPU figure.
+const TIMER_STATS: usize = 5;
 
 /// Posted by the display worker when monitors or values change.
 const WM_DISPLAYS: u32 = WM_APP + 4;
@@ -98,6 +105,10 @@ const WM_DISPLAYS: u32 = WM_APP + 4;
 const WM_RADIOS: u32 = WM_APP + 5;
 /// Posted by the media worker when what is playing changes.
 const WM_MEDIA: u32 = WM_APP + 6;
+/// Posted by the weather worker after a refresh.
+const WM_WEATHER: u32 = WM_APP + 7;
+/// The settings changed (`settings::set`).
+const WM_SETTINGS_CHANGED: u32 = WM_APP + 8;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 // Segoe Fluent Icons.
@@ -118,6 +129,25 @@ const ICON_PREVIOUS: char = '\u{E892}';
 const ICON_PLAY: char = '\u{E768}';
 const ICON_PAUSE: char = '\u{E769}';
 const ICON_NEXT: char = '\u{E893}';
+const ICON_SUN: char = '\u{E706}';
+const ICON_MOON: char = '\u{E708}';
+const ICON_CLOUD: char = '\u{E753}';
+const ICON_STORM: char = '\u{E945}';
+const ICON_CPU: char = '\u{E950}';
+const ICON_MEMORY: char = '\u{E964}';
+const ICON_DISK: char = '\u{EDA2}';
+const ICON_DOWN: char = '\u{E896}';
+const ICON_LEFT: char = '\u{E76B}';
+const ICON_RIGHT: char = '\u{E76C}';
+const ICON_PIN: char = '\u{E718}';
+const ICON_SIZE: char = '\u{E740}';
+const ICON_ZOOM: char = '\u{E71E}';
+const ICON_COLOR: char = '\u{E790}';
+const ICON_POWER: char = '\u{E7E8}';
+
+const MONTHS: [&str; 12] =
+    ["Ocak", "Şubat", "Mart", "Nisan", "Mayıs", "Haziran", "Temmuz", "Ağustos", "Eylül", "Ekim", "Kasım", "Aralık"];
+const WEEKDAYS: [&str; 7] = ["Pzt", "Sal", "Çar", "Per", "Cum", "Cmt", "Paz"];
 
 static NOTCH_HWND: AtomicIsize = AtomicIsize::new(0);
 
@@ -191,6 +221,63 @@ enum Slider {
     Volume,
     /// A monitor, by GDI device name.
     Brightness(String),
+    /// The shown player's own volume in the Windows mixer.
+    App,
+    /// The dock's and the notch's background opacity (Settings tab).
+    Opacity,
+}
+
+/// A row of options in the Settings tab.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Choice {
+    Mode,
+    Size,
+    Magnify,
+}
+
+impl Choice {
+    const ALL: [Choice; 3] = [Choice::Mode, Choice::Size, Choice::Magnify];
+
+    fn icon(self) -> char {
+        match self {
+            Choice::Mode => ICON_PIN,
+            Choice::Size => ICON_SIZE,
+            Choice::Magnify => ICON_ZOOM,
+        }
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Choice::Mode => "Dock modu",
+            Choice::Size => "Dock boyutu",
+            Choice::Magnify => "Büyütme",
+        }
+    }
+
+    fn options(self) -> [&'static str; 3] {
+        match self {
+            Choice::Mode => DockMode::ALL.map(|m| m.label()),
+            Choice::Size => DockSize::ALL.map(|m| m.label()),
+            Choice::Magnify => Magnify::ALL.map(|m| m.label()),
+        }
+    }
+
+    fn selected(self, s: &Settings) -> usize {
+        match self {
+            Choice::Mode => DockMode::ALL.iter().position(|m| *m == s.dock_mode),
+            Choice::Size => DockSize::ALL.iter().position(|m| *m == s.dock_size),
+            Choice::Magnify => Magnify::ALL.iter().position(|m| *m == s.magnify),
+        }
+        .unwrap_or(0)
+    }
+
+    fn select(self, s: &mut Settings, i: usize) {
+        match self {
+            Choice::Mode => s.dock_mode = DockMode::ALL[i],
+            Choice::Size => s.dock_size = DockSize::ALL[i],
+            Choice::Magnify => s.magnify = Magnify::ALL[i],
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -208,18 +295,31 @@ enum Control {
     Media(MediaButton),
     /// The progress bar: click to seek.
     Progress,
+    CalendarPrevious,
+    CalendarNext,
+    /// The month title: back to this month.
+    CalendarTitle,
     Tile(Tile),
     Button(Button),
     /// The slider's track (drag / click / wheel).
     Slider(Slider),
     /// The slider's icon (mute for the volume).
     SliderIcon(Slider),
+    /// One option of a Settings row.
+    Choice(Choice, usize),
+    Quit,
 }
 
 /// Tabs: (icon, available yet).
-const TABS: [(char, bool); 4] = [(ICON_MUSIC, true), (ICON_CONTROLS, true), (ICON_STATUS, false), (ICON_CALENDAR, false)];
+const TABS: [(char, bool); 5] =
+    [(ICON_MUSIC, true), (ICON_CONTROLS, true), (ICON_STATUS, true), (ICON_CALENDAR, true), (ICON_GEAR, true)];
 const MUSIC_TAB: usize = 0;
 const CONTROL_CENTER_TAB: usize = 1;
+const STATUS_TAB: usize = 2;
+const CALENDAR_TAB: usize = 3;
+const SETTINGS_TAB: usize = 4;
+/// A Settings row's height.
+const CHOICE_HEIGHT: f32 = 28.0;
 
 pub struct Notch {
     hwnd: HWND,
@@ -259,6 +359,9 @@ pub struct Notch {
     time: String,
     date: String,
     output: Option<audio::Output>,
+    settings: Settings,
+    /// The shown player's mixer volume, while it has a sound session.
+    app_volume: Option<audio::AppVolume>,
     internet: bool,
     radios: network::Radios,
     displays: Vec<displays::Display>,
@@ -276,6 +379,17 @@ pub struct Notch {
     music: Spring,
     track_format: IDWriteTextFormat,
     play_format: IDWriteTextFormat,
+    big_format: IDWriteTextFormat,
+    big_icon_format: IDWriteTextFormat,
+    weather: Option<weather::Weather>,
+    sampler: system::Sampler,
+    stats: system::Stats,
+    stats_interval: u32,
+    /// Today (year, month 1-12, day) and the month the calendar shows.
+    today: (i32, u32, u32),
+    month: (i32, u32),
+    /// The open panel's height; springs when the tab changes.
+    panel_h: Spring,
     /// `--snapshot`: never shown, draws on an opaque backdrop.
     headless: bool,
 }
@@ -357,6 +471,8 @@ impl Notch {
                 time: String::new(),
                 date: String::new(),
                 output: None,
+                settings: settings::get(),
+                app_volume: None,
                 internet: false,
                 radios: network::Radios::default(),
                 displays: Vec::new(),
@@ -369,6 +485,15 @@ impl Notch {
                 music: Spring::new(0.0),
                 track_format: formats.track,
                 play_format: formats.play,
+                big_format: formats.big,
+                big_icon_format: formats.big_icon,
+                weather: None,
+                sampler: system::Sampler::new(),
+                stats: system::Stats::default(),
+                stats_interval: 0,
+                today: (2000, 1, 1),
+                month: (2000, 1),
+                panel_h: Spring::new(0.0),
                 headless,
             });
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, notch.as_mut() as *mut Notch as isize);
@@ -380,6 +505,8 @@ impl Notch {
             }
             displays::start(hwnd, WM_DISPLAYS);
             media::start(hwnd, WM_MEDIA);
+            weather::start(hwnd, WM_WEATHER);
+            notch.update_stats_timer();
             network::refresh_radios(|| post(WM_RADIOS));
 
             // Nectar's opening: a circle rises to the edge, flattens, spreads out.
@@ -414,6 +541,8 @@ impl Notch {
                     self.tab_icon_format = f.tab_icon;
                     self.track_format = f.track;
                     self.play_format = f.play;
+                    self.big_format = f.big;
+                    self.big_icon_format = f.big_icon;
                 }
             }
             let m = info.rcMonitor;
@@ -438,6 +567,7 @@ impl Notch {
                 let _ = ShowWindow(self.hwnd, if hide { SW_HIDE } else { SW_SHOWNOACTIVATE });
             }
             self.update_level();
+            self.update_stats_timer();
         }
     }
 
@@ -447,6 +577,7 @@ impl Notch {
         const DAYS: [&str; 7] = ["Paz", "Pzt", "Sal", "Çar", "Per", "Cum", "Cmt"];
         const MONTHS: [&str; 12] = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"];
         let t = unsafe { GetLocalTime() };
+        self.today = (t.wYear as i32, t.wMonth as u32, t.wDay as u32);
         self.time = format!("{:02}:{:02}", t.wHour, t.wMinute);
         self.date = format!(
             "{} {} {}",
@@ -466,6 +597,21 @@ impl Notch {
         self.internet = network::internet();
         if self.dragging.is_none() {
             self.displays = displays::snapshot();
+        }
+        self.refresh_app_volume();
+    }
+
+    /// Reads the shown player's mixer volume; the Music tab grows or shrinks
+    /// when its slider comes or goes.
+    fn refresh_app_volume(&mut self) {
+        if self.dragging == Some(Slider::App) {
+            return;
+        }
+        let volume = self.track().and_then(|t| audio::app_volume(&t.app, &t.app_name));
+        let changed = volume.is_some() != self.app_volume.is_some();
+        self.app_volume = volume;
+        if changed {
+            self.sync_panel_height(self.open.value > 0.05);
         }
     }
 
@@ -527,15 +673,61 @@ impl Notch {
         }
         self.music.target = if self.playing() { 1.0 } else { 0.0 };
         self.update_level();
+        self.update_stats_timer();
+        if self.open.target > 0.5 {
+            self.refresh_app_volume();
+        }
+        self.sync_panel_height(true);
         self.start_animation();
         self.render();
     }
 
-    /// Runs the level/progress timer only while something plays and the notch
-    /// is on screen (and a little longer, to let the bars fall).
+    /// Reads CPU, memory, disk and network every second while the Status tab
+    /// is open (and on screen); never otherwise.
+    fn update_stats_timer(&mut self) {
+        let open = self.open.target > 0.5;
+        let interval = if self.headless || self.hidden_for_fullscreen {
+            0
+        } else if open && self.tab == STATUS_TAB {
+            1000
+        } else {
+            0
+        };
+        if interval != self.stats_interval {
+            self.stats_interval = interval;
+            unsafe {
+                if interval == 0 {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_STATS);
+                } else {
+                    SetTimer(Some(self.hwnd), TIMER_STATS, interval, None);
+                }
+            }
+        }
+    }
+
+    fn on_stats(&mut self) {
+        self.stats = self.sampler.sample();
+        self.render();
+    }
+
+    /// Springs the open panel to the current tab's height (or jumps there).
+    fn sync_panel_height(&mut self, animate: bool) {
+        let target = self.panel_height();
+        if !animate {
+            self.panel_h = Spring::new(target);
+        } else if (self.panel_h.target - target).abs() > 0.1 {
+            self.panel_h.target = target;
+            self.start_animation();
+        }
+    }
+
+    /// Runs the level-bar timer only while something plays and the closed
+    /// island is on screen (and a little longer, to let the bars fall). The
+    /// open panel has no bars; its progress bar follows the refresh timer.
     fn update_level(&mut self) {
         let want = !self.headless
             && !self.hidden_for_fullscreen
+            && self.open.target == 0.0
             && (self.playing() || self.bars.iter().any(|b| *b > 0.01));
         if want != self.level_running {
             self.level_running = want;
@@ -559,7 +751,9 @@ impl Notch {
             *bar += (target.min(1.0) - *bar) * rate;
         }
         self.update_level();
-        self.render();
+        if !self.animating {
+            self.render();
+        }
     }
 
     // ---- layout ------------------------------------------------------------
@@ -588,12 +782,20 @@ impl Notch {
             return 64.0;
         }
         let chips = if self.media.tracks.len() > 1 { 30.0 } else { 0.0 };
-        PAD * 0.7 + chips + ART + 14.0 + 16.0 + 8.0 + 40.0 + PAD * 0.8
+        let volume = if self.app_volume.is_some() { 14.0 + SLIDER_HEIGHT } else { 0.0 };
+        PAD * 0.7 + chips + ART + 14.0 + 16.0 + 8.0 + 40.0 + volume + PAD * 0.8
     }
 
     fn panel_height(&self) -> f32 {
-        if self.tab == MUSIC_TAB {
-            return self.music_height();
+        match self.tab {
+            MUSIC_TAB => return self.music_height(),
+            STATUS_TAB => return PAD * 0.7 + 64.0 + 10.0 + 52.0 * 2.0 + 10.0 + PAD * 0.8,
+            CALENDAR_TAB => return PAD * 0.7 + 28.0 + 6.0 + 18.0 + 6.0 * 28.0 + PAD * 0.6,
+            SETTINGS_TAB => {
+                let rows = Choice::ALL.len() as f32;
+                return PAD * 0.7 + rows * (CHOICE_HEIGHT + 10.0) + SLIDER_HEIGHT + 16.0 + 30.0 + PAD * 0.8;
+            }
+            _ => {}
         }
         let rows = self.tiles().len().div_ceil(2) as f32;
         let sliders = self.sliders().len() as f32;
@@ -611,8 +813,13 @@ impl Notch {
     fn closed_width(&self) -> f32 {
         let (tw, _) = self.text_size(&self.time, &self.time_format);
         let (dw, _) = self.text_size(&self.date, &self.date_format);
-        let music = 64.0 * self.scale * self.music.value.clamp(0.0, 1.0);
-        (tw + dw + 8.0 * self.scale + 36.0 * self.scale).max(CLOSED_MIN_WIDTH * self.scale) + music
+        let s = self.scale;
+        let m = self.music.value.clamp(0.0, 1.0);
+        // Time centered; weather on the left and the date on the right, each
+        // in a side as wide as the date.
+        let status = tw + 2.0 * (dw.max(STATUS_SIDE * s) + 30.0 * s);
+        let music = (tw + dw + 8.0 * s + 36.0 * s).max(CLOSED_MIN_WIDTH * s) + 64.0 * s;
+        lerp(status, music, m)
     }
 
     /// The island right now.
@@ -621,7 +828,7 @@ impl Notch {
         let width = self.surface.width as f32;
         let o = self.open.value.clamp(0.0, 1.05);
         let w = lerp(self.closed_width(), OPEN_WIDTH * s, o);
-        let h = lerp(BAR * s, (BAR + self.panel_height()) * s, o);
+        let h = lerp(BAR * s, (BAR + self.panel_h.value) * s, o);
         let e = self.spread.value.clamp(0.0, 1.05);
         let c = CIRCLE * s;
         let w = lerp(c, w, e);
@@ -648,6 +855,37 @@ impl Notch {
         }
         if self.tab == MUSIC_TAB {
             self.music_controls(island, &mut list);
+            return list;
+        }
+        if self.tab == CALENDAR_TAB {
+            let left = island.left + PAD * s;
+            let right = island.right - PAD * s;
+            let y = island.top + BAR * s + PAD * 0.7 * s;
+            list.push((rect(left, y, left + 28.0 * s, y + 28.0 * s), Control::CalendarPrevious));
+            list.push((rect(right - 28.0 * s, y, right, y + 28.0 * s), Control::CalendarNext));
+            let mid = (left + right) / 2.0;
+            list.push((rect(mid - 70.0 * s, y, mid + 70.0 * s, y + 28.0 * s), Control::CalendarTitle));
+            return list;
+        }
+        if self.tab == SETTINGS_TAB {
+            let left = island.left + PAD * s;
+            let right = island.right - PAD * s;
+            let mut y = island.top + BAR * s + PAD * 0.7 * s;
+            let x0 = left + LABEL_WIDTH * s;
+            for choice in Choice::ALL {
+                let n = choice.options().len();
+                let w = (right - x0) / n as f32;
+                for i in 0..n {
+                    let x = x0 + i as f32 * w;
+                    list.push((rect(x, y, x + w, y + CHOICE_HEIGHT * s), Control::Choice(choice, i)));
+                }
+                y += (CHOICE_HEIGHT + 10.0) * s;
+            }
+            let icon = rect(left, y, left + 18.0 * s, y + SLIDER_HEIGHT * s);
+            list.push((icon, Control::SliderIcon(Slider::Opacity)));
+            list.push((rect(x0, y, right - 40.0 * s, y + SLIDER_HEIGHT * s), Control::Slider(Slider::Opacity)));
+            y += (SLIDER_HEIGHT + 16.0) * s;
+            list.push((rect(right - 132.0 * s, y, right, y + 30.0 * s), Control::Quit));
             return list;
         }
         if self.tab != CONTROL_CENTER_TAB {
@@ -719,6 +957,13 @@ impl Notch {
         list.push((rect(px, mid - small / 2.0, px + small, mid + small / 2.0), Control::Media(MediaButton::Previous)));
         let nx = cx + big / 2.0 + gap;
         list.push((rect(nx, mid - small / 2.0, nx + small, mid + small / 2.0), Control::Media(MediaButton::Next)));
+        if self.app_volume.is_some() {
+            let y = y + big + 14.0 * s;
+            let icon = rect(left, y, left + 18.0 * s, y + SLIDER_HEIGHT * s);
+            let track = rect(left + LABEL_WIDTH * s, y, right - 40.0 * s, y + SLIDER_HEIGHT * s);
+            list.push((icon, Control::SliderIcon(Slider::App)));
+            list.push((track, Control::Slider(Slider::App)));
+        }
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Control> {
@@ -734,6 +979,8 @@ impl Notch {
     fn slider_value(&self, slider: &Slider) -> Option<f32> {
         match slider {
             Slider::Volume => self.output.as_ref().map(|o| if o.muted { 0.0 } else { o.volume }),
+            Slider::App => self.app_volume.map(|a| if a.muted { 0.0 } else { a.volume }),
+            Slider::Opacity => Some(self.settings.opacity),
             Slider::Brightness(device) => self
                 .displays
                 .iter()
@@ -754,6 +1001,23 @@ impl Notch {
                         o.muted = false;
                     }
                 }
+            }
+            Slider::App => {
+                if let Some(t) = self.track() {
+                    let (app, name) = (t.app.clone(), t.app_name.clone());
+                    audio::set_app_volume(&app, &name, value);
+                }
+                if let Some(a) = &mut self.app_volume {
+                    a.volume = value;
+                    if value > 0.0 {
+                        a.muted = false;
+                    }
+                }
+            }
+            Slider::Opacity => {
+                // Saved when the slider is let go.
+                self.settings.opacity = value.max(settings::MIN_OPACITY);
+                settings::set(self.settings, false);
             }
             Slider::Brightness(device) => {
                 if let Some(d) = self.displays.iter_mut().find(|d| &d.device == device) {
@@ -796,14 +1060,19 @@ impl Notch {
                 // Music while something plays, otherwise the Control Center.
                 self.tab = if self.playing() { MUSIC_TAB } else { CONTROL_CENTER_TAB };
                 self.player = None;
+                self.month = (self.today.0, self.today.1);
+                self.stats = self.sampler.sample();
                 self.refresh_controls();
                 displays::refresh();
                 unsafe { SetTimer(Some(self.hwnd), TIMER_REFRESH, 700, None) };
+                self.sync_panel_height(false);
             } else {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_REFRESH);
                 }
             }
+            self.update_stats_timer();
+            self.update_level();
             self.start_animation();
         }
     }
@@ -838,6 +1107,7 @@ impl Notch {
         moving |= self.spread.step(dt, 312.5, 35.0);
         moving |= self.open.step(dt, 312.5, 35.0);
         moving |= self.music.step(dt, 312.5, 35.0);
+        moving |= self.panel_h.step(dt, 312.5, 35.0);
 
         self.render();
         if !moving {
@@ -962,7 +1232,8 @@ impl Notch {
             rt.Clear(Some(&if self.headless { rgba(0.32, 0.40, 0.52, 1.0) } else { rgba(0.0, 0.0, 0.0, 0.0) }));
             if let Some(path) = self.island_path(island, top_radius, bottom_radius, flare) {
                 let (r, g, b) = SURFACE;
-                self.brush.SetColor(&rgba(r, g, b, lerp(0.80, 0.92, o)));
+                let base = self.settings.opacity;
+                self.brush.SetColor(&rgba(r, g, b, lerp(base, (base + 0.07).min(1.0), o)));
                 rt.FillGeometry(&path, &self.brush, None);
             }
 
@@ -978,13 +1249,21 @@ impl Notch {
                 if m > 0.01 {
                     self.draw_closed_music(island, cy, closed * m);
                 }
-                // The text stays centered between the art and the bars.
-                let x = (island.left + island.right - total) / 2.0;
+                if m < 0.99 {
+                    self.draw_closed_status(island, cy, closed * (1.0 - m));
+                }
+                // With music the time and date sit together between the art
+                // and the bars; without, the time is centered and the date
+                // goes to the right edge, across from the weather.
+                let mid = (island.left + island.right) / 2.0;
+                let together = mid - total / 2.0;
+                let x = lerp(mid - tw / 2.0, together, m);
+                let date_x = lerp(island.right - 14.0 * s - dw, together + tw + 8.0 * s, m);
                 self.text(&self.time, &self.time_format, pt(x, cy - th / 2.0), rgba(1.0, 1.0, 1.0, 0.95 * closed), tw + 4.0);
                 self.text(
                     &self.date,
                     &self.date_format,
-                    pt(x + tw + 8.0 * s, cy - dh / 2.0),
+                    pt(date_x, cy - dh / 2.0),
                     rgba(1.0, 1.0, 1.0, 0.65 * closed),
                     dw + 4.0,
                 );
@@ -1035,6 +1314,213 @@ impl Notch {
             let h = 3.0 * s + level.clamp(0.0, 1.0) * 13.0 * s;
             let x = x0 + i as f32 * (w + gap);
             self.fill_rounded(rect(x, cy - h / 2.0, x + w, cy + h / 2.0), w / 2.0, with_alpha(ACCENT, alpha));
+        }
+    }
+
+    /// The weather on the left of the closed island.
+    fn draw_closed_status(&self, island: D2D_RECT_F, cy: f32, alpha: f32) {
+        let s = self.scale;
+        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let (glyph, temp) = match &self.weather {
+            Some(w) => (weather_icon(w), format!("{:.0}°", w.temperature)),
+            None => (ICON_CLOUD, "--°".to_string()),
+        };
+        let x = island.left + 14.0 * s;
+        self.icon(glyph, &self.icon_format, rect(x, cy - 8.0 * s, x + 16.0 * s, cy + 8.0 * s), white(0.85));
+        let (_, th) = self.text_size(&temp, &self.date_format);
+        self.text(&temp, &self.date_format, pt(x + 20.0 * s, cy - th / 2.0), white(0.85), 40.0 * s);
+    }
+
+    /// The Status tab: a weather card, then CPU, memory, disk and network cards.
+    fn draw_status(&self, island: D2D_RECT_F, alpha: f32) {
+        let s = self.scale;
+        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let left = island.left + PAD * s;
+        let right = island.right - PAD * s;
+        let mut y = island.top + BAR * s + PAD * 0.7 * s;
+
+        let card = rect(left, y, right, y + 64.0 * s);
+        self.fill_rounded(card, 12.0 * s, white(0.05));
+        match &self.weather {
+            Some(w) => {
+                let icon = rect(card.left + 10.0 * s, card.top + 10.0 * s, card.left + 54.0 * s, card.bottom - 10.0 * s);
+                self.icon(weather_icon(w), &self.big_icon_format, icon, white(0.9));
+                let temp = format!("{:.0}°", w.temperature);
+                let (tw, th) = self.text_size(&temp, &self.big_format);
+                let tx = icon.right + 6.0 * s;
+                let cy = (card.top + card.bottom) / 2.0;
+                self.text(&temp, &self.big_format, pt(tx, cy - th / 2.0), white(0.95), tw + 4.0);
+                let x = tx + tw + 14.0 * s;
+                let condition = w.condition();
+                let (_, ch) = self.text_size(condition, &self.title_format);
+                let (_, nh) = self.text_size(&w.city, &self.small_format);
+                let top = cy - (ch + nh) / 2.0;
+                self.text(condition, &self.title_format, pt(x, top), white(0.9), card.right - x - 90.0 * s);
+                self.text(&w.city, &self.small_format, pt(x, top + ch), white(0.5), card.right - x - 90.0 * s);
+                if w.high.is_finite() && w.low.is_finite() {
+                    let range = format!("En yüksek {:.0}°  En düşük {:.0}°", w.high, w.low);
+                    let (rw, rh) = self.text_size(&range, &self.small_format);
+                    self.text(&range, &self.small_format, pt(card.right - 12.0 * s - rw, cy - rh / 2.0), white(0.55), rw + 4.0);
+                }
+            }
+            None => {
+                let text = "Hava durumu alınıyor…";
+                let (w, h) = self.text_size(text, &self.title_format);
+                self.text(
+                    text,
+                    &self.title_format,
+                    pt((card.left + card.right - w) / 2.0, (card.top + card.bottom - h) / 2.0),
+                    white(0.5),
+                    w + 4.0,
+                );
+            }
+        }
+        y = card.bottom + 10.0 * s;
+
+        let st = &self.stats;
+        let ratio = |used: u64, total: u64| if total > 0 { used as f32 / total as f32 } else { 0.0 };
+        let cards = [
+            (ICON_CPU, "İşlemci".to_string(), format!("%{:.0}", st.cpu * 100.0), Some(st.cpu)),
+            (
+                ICON_MEMORY,
+                "Bellek".to_string(),
+                format!("{} / {}", system::format_bytes(st.memory_used), system::format_bytes(st.memory_total)),
+                Some(ratio(st.memory_used, st.memory_total)),
+            ),
+            (
+                ICON_DISK,
+                "Disk (C:)".to_string(),
+                format!("{} boş", system::format_bytes(st.disk_total.saturating_sub(st.disk_used))),
+                Some(ratio(st.disk_used, st.disk_total)),
+            ),
+            (
+                ICON_DOWN,
+                "Ağ".to_string(),
+                format!("↓ {}   ↑ {}", system::format_rate(st.down), system::format_rate(st.up)),
+                None,
+            ),
+        ];
+        let col = (right - left - 10.0 * s) / 2.0;
+        for (i, (glyph, title, value, fraction)) in cards.iter().enumerate() {
+            let x = left + (i % 2) as f32 * (col + 10.0 * s);
+            let top = y + (i / 2) as f32 * (52.0 + 10.0) * s;
+            let r = rect(x, top, x + col, top + 52.0 * s);
+            self.fill_rounded(r, 11.0 * s, white(0.05));
+            let icon = rect(r.left + 10.0 * s, r.top + 8.0 * s, r.left + 26.0 * s, r.top + 24.0 * s);
+            self.icon(*glyph, &self.icon_format, icon, white(0.8));
+            let (_, th) = self.text_size(title, &self.title_format);
+            self.text(title, &self.title_format, pt(icon.right + 6.0 * s, (icon.top + icon.bottom - th) / 2.0), white(0.9), col);
+            let (vw, vh) = self.text_size(value, &self.small_format);
+            match fraction {
+                Some(f) => {
+                    self.text(value, &self.small_format, pt(r.right - 10.0 * s - vw, (icon.top + icon.bottom - vh) / 2.0), white(0.6), vw + 4.0);
+                    let bar = rect(r.left + 10.0 * s, r.bottom - 14.0 * s, r.right - 10.0 * s, r.bottom - 10.0 * s);
+                    self.fill_rounded(bar, 2.0 * s, white(0.12));
+                    let fill = rect(bar.left, bar.top, bar.left + (bar.right - bar.left) * f.clamp(0.0, 1.0), bar.bottom);
+                    if fill.right - fill.left > 0.5 {
+                        let color = if *f > 0.9 { rgba(1.0, 0.45, 0.4, alpha) } else { with_alpha(ACCENT, alpha) };
+                        self.fill_rounded(fill, 2.0 * s, color);
+                    }
+                }
+                None => {
+                    self.text(value, &self.small_format, pt(r.left + 10.0 * s, r.bottom - 10.0 * s - vh), white(0.7), col - 20.0 * s);
+                }
+            }
+        }
+    }
+
+    /// The Calendar tab: a Monday-first month grid with today marked.
+    /// The Settings tab's row titles and a note; the options are controls.
+    fn draw_settings(&self, island: D2D_RECT_F, alpha: f32) {
+        let s = self.scale;
+        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let left = island.left + PAD * s;
+        let mut y = island.top + BAR * s + PAD * 0.7 * s;
+        for choice in Choice::ALL {
+            let cy = y + CHOICE_HEIGHT * s / 2.0;
+            self.icon(choice.icon(), &self.icon_format, rect(left, cy - 9.0 * s, left + 18.0 * s, cy + 9.0 * s), white(0.8));
+            let (_, th) = self.text_size(choice.title(), &self.title_format);
+            let x = left + 24.0 * s;
+            self.text(choice.title(), &self.title_format, pt(x, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
+            y += (CHOICE_HEIGHT + 10.0) * s;
+        }
+        y += (SLIDER_HEIGHT + 16.0) * s;
+        let note = "Ayarlar kendiliğinden kaydedilir";
+        let (_, nh) = self.text_size(note, &self.small_format);
+        self.text(note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), white(0.4), 220.0 * s);
+    }
+
+    fn draw_calendar(&self, island: D2D_RECT_F, alpha: f32) {
+        let s = self.scale;
+        let white = |a: f32| rgba(1.0, 1.0, 1.0, a * alpha);
+        let hovered = self.hovered_control();
+        let left = island.left + PAD * s;
+        let right = island.right - PAD * s;
+        let mut y = island.top + BAR * s + PAD * 0.7 * s;
+        let (year, month) = self.month;
+
+        for (control, glyph) in [(Control::CalendarPrevious, ICON_LEFT), (Control::CalendarNext, ICON_RIGHT)] {
+            let r = if control == Control::CalendarPrevious {
+                rect(left, y, left + 28.0 * s, y + 28.0 * s)
+            } else {
+                rect(right - 28.0 * s, y, right, y + 28.0 * s)
+            };
+            let hot = hovered == Some(control);
+            if hot {
+                self.fill_rounded(r, 14.0 * s, white(0.10));
+            }
+            self.icon(glyph, &self.icon_format, r, white(if hot { 1.0 } else { 0.7 }));
+        }
+        let title = format!("{} {}", MONTHS[(month - 1) as usize], year);
+        let (tw, th) = self.text_size(&title, &self.track_format);
+        let current = (year, month) == (self.today.0, self.today.1);
+        let title_alpha = if hovered == Some(Control::CalendarTitle) && !current { 1.0 } else { 0.95 };
+        self.text(&title, &self.track_format, pt((left + right - tw) / 2.0, y + 14.0 * s - th / 2.0), white(title_alpha), tw + 4.0);
+        y += 34.0 * s;
+
+        let cell = (right - left) / 7.0;
+        for (i, day) in WEEKDAYS.iter().enumerate() {
+            let (w, h) = self.text_size(day, &self.small_format);
+            let x = left + i as f32 * cell + (cell - w) / 2.0;
+            self.text(day, &self.small_format, pt(x, y + (18.0 * s - h) / 2.0), white(if i >= 5 { 0.4 } else { 0.55 }), w + 4.0);
+        }
+        y += 18.0 * s;
+
+        let first = weekday_monday0(year, month, 1);
+        let days = days_in_month(year, month);
+        let (py, pm) = if month == 1 { (year - 1, 12) } else { (year, month - 1) };
+        let previous_days = days_in_month(py, pm);
+        for row in 0..6 {
+            for col in 0..7 {
+                let index = row * 7 + col;
+                let n = index as i32 - first as i32 + 1;
+                let (label, inside) = if n < 1 {
+                    ((previous_days as i32 + n) as u32, false)
+                } else if n as u32 > days {
+                    (n as u32 - days, false)
+                } else {
+                    (n as u32, true)
+                };
+                let cx = left + col as f32 * cell + cell / 2.0;
+                let cy = y + row as f32 * 28.0 * s + 14.0 * s;
+                let today = inside && (year, month, label) == self.today;
+                let text = label.to_string();
+                let (w, h) = self.text_size(&text, &self.title_format);
+                if today {
+                    let r = 12.0 * s;
+                    self.fill_rounded(rect(cx - r, cy - r, cx + r, cy + r), r, with_alpha(ACCENT, alpha));
+                }
+                let color = if today {
+                    with_alpha(ON_ACCENT, alpha)
+                } else if !inside {
+                    white(0.22)
+                } else if col >= 5 {
+                    white(0.6)
+                } else {
+                    white(0.9)
+                };
+                self.text(&text, &self.title_format, pt(cx - w / 2.0, cy - h / 2.0), color, w + 4.0);
+            }
         }
     }
 
@@ -1122,8 +1608,12 @@ impl Notch {
         let (dw, dh) = self.text_size(&self.date, &self.date_format);
         self.text(&self.date, &self.date_format, pt(island.right - 16.0 * s - dw, cy - dh / 2.0), white(0.65), dw + 4.0);
 
-        if self.tab == MUSIC_TAB {
-            self.draw_music(island, alpha);
+        match self.tab {
+            SETTINGS_TAB => self.draw_settings(island, alpha),
+            MUSIC_TAB => self.draw_music(island, alpha),
+            STATUS_TAB => self.draw_status(island, alpha),
+            CALENDAR_TAB => self.draw_calendar(island, alpha),
+            _ => {}
         }
         for (r, control) in self.controls(island) {
             match control {
@@ -1142,6 +1632,7 @@ impl Notch {
                         r.right - r.left,
                     );
                 }
+                Control::CalendarPrevious | Control::CalendarNext | Control::CalendarTitle => {}
                 Control::Progress => {
                     if let Some(track) = self.track() {
                         let hot = hovered == Some(Control::Progress);
@@ -1220,12 +1711,17 @@ impl Notch {
                     let glyph = match &slider {
                         Slider::Volume if self.output.as_ref().is_some_and(|o| o.muted) => ICON_MUTE,
                         Slider::Volume => ICON_VOLUME,
+                        Slider::App if self.app_volume.is_some_and(|a| a.muted) => ICON_MUTE,
+                        Slider::App => ICON_VOLUME,
                         Slider::Brightness(_) => ICON_BRIGHTNESS,
+                        Slider::Opacity => ICON_COLOR,
                     };
-                    let hot = hovered == Some(Control::SliderIcon(slider.clone())) && slider == Slider::Volume;
+                    let hot = hovered == Some(Control::SliderIcon(slider.clone())) && matches!(slider, Slider::Volume | Slider::App);
                     self.icon(glyph, &self.icon_format, r, white(if hot { 1.0 } else { 0.8 }));
                     let name = match &slider {
                         Slider::Volume => "Ses".to_string(),
+                        Slider::App => self.track().map(|t| t.app_name.clone()).unwrap_or_default(),
+                        Slider::Opacity => "Opaklık".to_string(),
                         Slider::Brightness(device) => {
                             self.displays.iter().find(|d| &d.device == device).map(|d| d.name.clone()).unwrap_or_default()
                         }
@@ -1236,6 +1732,40 @@ impl Notch {
                     self.text(&name, &self.title_format, pt(x, (r.top + r.bottom - nh) / 2.0), white(0.9), limit);
                 }
                 Control::Slider(slider) => self.draw_slider(r, &slider, hovered == Some(Control::Slider(slider.clone())), alpha),
+                Control::Choice(choice, i) => {
+                    let n = choice.options().len();
+                    let selected = choice.selected(&self.settings) == i;
+                    let hot = hovered == Some(Control::Choice(choice, i));
+                    let radius = (r.bottom - r.top) / 2.0;
+                    // The row's track once, behind its first option.
+                    if i == 0 {
+                        let track = rect(r.left, r.top, r.left + (r.right - r.left) * n as f32, r.bottom);
+                        self.fill_rounded(track, radius, white(0.06));
+                    }
+                    let inner = rect(r.left + 2.0 * s, r.top + 2.0 * s, r.right - 2.0 * s, r.bottom - 2.0 * s);
+                    if selected {
+                        self.fill_rounded(inner, radius - 2.0 * s, with_alpha(ACCENT, alpha));
+                    } else if hot {
+                        self.fill_rounded(inner, radius - 2.0 * s, white(0.08));
+                    }
+                    let label = choice.options()[i];
+                    let (lw, lh) = self.text_size(label, &self.title_format);
+                    let color = if selected { with_alpha(ON_ACCENT, alpha) } else { white(if hot { 0.95 } else { 0.7 }) };
+                    self.text(label, &self.title_format, pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0), color, lw + 4.0);
+                }
+                Control::Quit => {
+                    let hot = hovered == Some(Control::Quit);
+                    let pressed = self.pressed == Some(Control::Quit);
+                    let bg = if pressed { 0.16 } else if hot { 0.11 } else { 0.06 };
+                    self.fill_rounded(r, 15.0 * s, white(bg));
+                    let label = "Pollen'dan çık";
+                    let (lw, lh) = self.text_size(label, &self.title_format);
+                    let iw = 16.0 * s;
+                    let x = (r.left + r.right - iw - 6.0 * s - lw) / 2.0;
+                    let cy = (r.top + r.bottom) / 2.0;
+                    self.icon(ICON_POWER, &self.icon_format, rect(x, cy - 8.0 * s, x + iw, cy + 8.0 * s), white(if hot { 1.0 } else { 0.8 }));
+                    self.text(label, &self.title_format, pt(x + iw + 6.0 * s, cy - lh / 2.0), white(if hot { 1.0 } else { 0.85 }), lw + 4.0);
+                }
             }
         }
 
@@ -1369,7 +1899,9 @@ impl Notch {
         if !self.hidden_for_fullscreen && self.opening_since.is_none() {
             self.set_open(true);
         }
-        self.render();
+        if !self.animating {
+            self.render();
+        }
     }
 
     fn on_mouse_leave(&mut self) {
@@ -1399,7 +1931,10 @@ impl Notch {
     }
 
     fn on_up(&mut self, x: f32, y: f32) {
-        if self.dragging.take().is_some() {
+        if let Some(slider) = self.dragging.take() {
+            if slider == Slider::Opacity {
+                settings::write_file(&self.settings);
+            }
             unsafe {
                 let _ = ReleaseCapture();
             }
@@ -1417,10 +1952,24 @@ impl Notch {
     fn activate(&mut self, control: Control) {
         match control {
             Control::Tab(i) => {
-                if TABS[i].1 {
+                if TABS[i].1 && self.tab != i {
                     self.tab = i;
+                    if i == STATUS_TAB {
+                        self.stats = self.sampler.sample();
+                    }
+                    self.update_stats_timer();
+                    self.sync_panel_height(true);
                 }
             }
+            Control::CalendarPrevious => {
+                let (y, m) = self.month;
+                self.month = if m == 1 { (y - 1, 12) } else { (y, m - 1) };
+            }
+            Control::CalendarNext => {
+                let (y, m) = self.month;
+                self.month = if m == 12 { (y + 1, 1) } else { (y, m + 1) };
+            }
+            Control::CalendarTitle => self.month = (self.today.0, self.today.1),
             Control::Tile(Tile::Network) => shell::launch("ms-settings:network-status"),
             // Windows 11's sound output picker.
             Control::Tile(Tile::Output) => shell::press_keys(&[VK_LWIN, VK_CONTROL, VIRTUAL_KEY(b'V' as u16)]),
@@ -1440,7 +1989,27 @@ impl Notch {
                 audio::toggle_mute();
                 self.output = audio::read();
             }
-            Control::Player(app) => self.player = Some(app),
+            Control::SliderIcon(Slider::App) => {
+                if let Some(t) = self.track() {
+                    let (app, name) = (t.app.clone(), t.app_name.clone());
+                    audio::toggle_app_mute(&app, &name);
+                }
+                self.refresh_app_volume();
+            }
+            Control::Choice(choice, i) => {
+                let mut settings = self.settings;
+                choice.select(&mut settings, i);
+                if settings != self.settings {
+                    self.settings = settings;
+                    settings::set(settings, true);
+                }
+            }
+            Control::Quit => crate::dock::quit(),
+            Control::Player(app) => {
+                self.player = Some(app);
+                self.refresh_app_volume();
+                self.sync_panel_height(true);
+            }
             Control::Media(button) => {
                 if let Some(track) = self.track().cloned() {
                     let command = match button {
@@ -1524,10 +2093,41 @@ impl Notch {
         }
         save(&notch, "1-closed-music");
         notch.tab = MUSIC_TAB;
+        notch.refresh_app_volume();
+        notch.sync_panel_height(false);
         notch.open.target = 1.0;
         step(&mut notch, 50);
         save(&notch, "2-music");
+        notch.tab = MUSIC_TAB;
+        notch.sync_panel_height(false);
+        notch.weather = std::thread::spawn(|| {
+            let _ = unsafe {
+                windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED)
+            };
+            weather::check()
+        })
+        .join()
+        .ok()
+        .flatten();
+        std::thread::sleep(Duration::from_millis(400));
+        notch.stats = notch.sampler.sample();
+        notch.month = (notch.today.0, notch.today.1);
+        for (tab, name) in [(STATUS_TAB, "2b-status"), (CALENDAR_TAB, "2c-calendar"), (SETTINGS_TAB, "2e-settings")] {
+            notch.tab = tab;
+            notch.sync_panel_height(false);
+            notch.render();
+            save(&notch, name);
+        }
+        let playing = notch.media.clone();
+        notch.apply_media(media::Snapshot::default());
+        notch.music = Spring::new(0.0);
+        notch.open = Spring::new(0.0);
+        notch.render();
+        save(&notch, "2d-closed-status");
+        notch.apply_media(playing);
+        notch.music = Spring::new(notch.music.target);
         notch.tab = CONTROL_CENTER_TAB;
+        notch.sync_panel_height(false);
         notch.open = Spring::new(0.0);
         notch.open.target = 1.0;
         step(&mut notch, 8);
@@ -1560,6 +2160,8 @@ struct Formats {
     tab_icon: IDWriteTextFormat,
     track: IDWriteTextFormat,
     play: IDWriteTextFormat,
+    big: IDWriteTextFormat,
+    big_icon: IDWriteTextFormat,
 }
 
 impl Formats {
@@ -1599,8 +2201,41 @@ impl Formats {
             tab_icon: icons(16.0)?,
             track: text(13.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
             play: icons(18.0)?,
+            big: text(26.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
+            big_icon: icons(28.0)?,
         })
     }
+}
+
+fn weather_icon(w: &weather::Weather) -> char {
+    match w.code {
+        0 | 1 => {
+            if w.day {
+                ICON_SUN
+            } else {
+                ICON_MOON
+            }
+        }
+        95..=99 => ICON_STORM,
+        _ => ICON_CLOUD,
+    }
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        _ if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+        _ => 28,
+    }
+}
+
+/// Day of the week, Monday = 0 (Sakamoto's method).
+fn weekday_monday0(year: i32, month: u32, day: u32) -> u32 {
+    const T: [i32; 12] = [0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
+    let y = if month < 3 { year - 1 } else { year };
+    let sunday0 = (y + y / 4 - y / 100 + y / 400 + T[(month - 1) as usize] + day as i32).rem_euclid(7);
+    ((sunday0 + 6) % 7) as u32
 }
 
 /// 3:07, or 1:02:44 past an hour.
@@ -1621,6 +2256,11 @@ fn post(message: u32) {
             let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(Some(hwnd), message, WPARAM(0), LPARAM(0));
         }
     }
+}
+
+/// Tells the notch to pick up changed settings.
+pub fn settings_changed() {
+    post(WM_SETTINGS_CHANGED);
 }
 
 /// The dock tells the notch when a fullscreen window takes over the screen.
@@ -1703,6 +2343,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     notch.render();
                 }
                 TIMER_LEVEL => notch.on_level(),
+                TIMER_STATS => notch.on_stats(),
                 _ => {}
             }
             LRESULT(0)
@@ -1715,6 +2356,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             }
             LRESULT(0)
         }
+        WM_SETTINGS_CHANGED => {
+            let notch = &mut *ptr;
+            notch.settings = settings::get();
+            notch.render();
+            LRESULT(0)
+        }
+        WM_WEATHER => {
+            let notch = &mut *ptr;
+            notch.weather = weather::current();
+            notch.render();
+            LRESULT(0)
+        }
         WM_MEDIA => {
             (*ptr).on_media();
             LRESULT(0)
@@ -1722,6 +2375,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_RADIOS => {
             let notch = &mut *ptr;
             notch.radios = network::radios();
+            notch.sync_panel_height(true);
             notch.render();
             LRESULT(0)
         }
