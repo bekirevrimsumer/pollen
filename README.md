@@ -96,7 +96,8 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Replaces the Windows taskbar, with a dock on every monitor (the same apps on each;
   monitors that come and go get or lose theirs)
 - Looks like Nectar's dock: Nectar's "Midnight" color, attached to the bottom edge,
-  rounded on top with small inward flares, macOS-style magnification
+  rounded on top with small inward flares, macOS-style magnification; optional boxes
+  behind the icons, as in Nectar (Settings › Icon boxes)
 - Animations run in step with the display's refresh rate (144 fps on a 144 Hz screen)
 - Nectar's motion: hiding shrinks the bar into a circle that sinks below the edge;
   showing raises the circle, flattens it against the edge and spreads it into the bar
@@ -184,13 +185,13 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Calendar: a plain month view (Monday first), today highlighted, previous / next
   month. No accounts or calendar sync
 - Settings: the language (Auto follows Windows; Türkçe or English), the dock's mode,
-  size and magnification, starting with Windows (off
+  size, magnification and icon boxes, starting with Windows (off
   until turned on; a value under the user's `Run` key), the weather's place, the
   theme (Nectar's presets: Midnight, Graphite, Ocean, Forest, Plum, Rose, Ember;
   the light Light, Latte and Mist; or Windows, which follows Windows' accent color
   and its light or dark mode), the background opacity of the
-  dock and the notch, and quitting Pollen. Changes apply at once and are saved
-  in `%APPDATA%\Pollen\settings.txt`
+  dock and the notch, and quitting Pollen. Hovering an option explains it. Changes
+  apply at once and are saved in `%APPDATA%\Pollen\settings.txt`
 
 The weather comes from [Open-Meteo](https://open-meteo.com/) for a rough location
 looked up from the computer's public IP address (ipwho.is, falling back to

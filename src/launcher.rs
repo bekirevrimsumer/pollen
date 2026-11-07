@@ -22,7 +22,6 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST};
@@ -195,6 +194,8 @@ struct Launcher {
     surface: Surface,
     brush: ID2D1SolidColorBrush,
     dwrite: IDWriteFactory,
+    /// Text layouts kept between frames.
+    texts: crate::text::TextCache,
     input_format: IDWriteTextFormat,
     title_format: IDWriteTextFormat,
     sub_format: IDWriteTextFormat,
@@ -647,6 +648,7 @@ fn create() -> Option<HWND> {
             surface,
             brush,
             dwrite,
+            texts: Default::default(),
             input_format: input,
             title_format: title,
             sub_format: sub,
@@ -773,6 +775,7 @@ impl Launcher {
         // The pixels are not needed while hidden.
         let _ = self.surface.resize(1, 1);
         self.icons.clear();
+        self.texts.clear();
     }
 
     fn search(&mut self) {
@@ -879,28 +882,13 @@ impl Launcher {
     }
 
     fn text_size(&self, text: &str, format: &IDWriteTextFormat) -> (f32, f32) {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            match self.dwrite.CreateTextLayout(&utf16, format, 4000.0, 200.0) {
-                Ok(layout) => {
-                    let mut m = DWRITE_TEXT_METRICS::default();
-                    let _ = layout.GetMetrics(&mut m);
-                    (m.widthIncludingTrailingWhitespace, m.height)
-                }
-                Err(_) => (0.0, 0.0),
-            }
-        }
+        let m = self.texts.metrics(&self.dwrite, text, format);
+        (m.widthIncludingTrailingWhitespace, m.height)
     }
 
     fn text(&self, text: &str, format: &IDWriteTextFormat, x: f32, y: f32, color: D2D1_COLOR_F, max_width: f32) {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let Some(layout) = self.texts.line(&self.dwrite, text, format, max_width) else { return };
         unsafe {
-            let Ok(layout) = self.dwrite.CreateTextLayout(&utf16, format, max_width.max(1.0), 200.0) else { return };
-            let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            if let Ok(sign) = self.dwrite.CreateEllipsisTrimmingSign(format) {
-                let trimming = DWRITE_TRIMMING { granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER, delimiter: 0, delimiterCount: 0 };
-                let _ = layout.SetTrimming(&trimming, &sign);
-            }
             self.brush.SetColor(&color);
             self.surface.rt.DrawTextLayout(Vector2 { X: x, Y: y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }

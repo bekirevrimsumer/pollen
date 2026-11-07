@@ -34,20 +34,19 @@ use windows::core::{HSTRING, w, Result, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{
     D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_FILLED, D2D1_FIGURE_END_CLOSED,
-    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U,
+    D2D1_GRADIENT_STOP, D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F, D2D_SIZE_U,
 };
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Bitmap, ID2D1DCRenderTarget, ID2D1Factory, ID2D1PathGeometry,
     ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_SMALL,
     D2D1_BITMAP_INTERPOLATION_MODE_LINEAR, D2D1_BITMAP_PROPERTIES, D2D1_DRAW_TEXT_OPTIONS_NONE,
-    D2D1_FACTORY_TYPE_SINGLE_THREADED, 
+    D2D1_EXTEND_MODE_CLAMP, D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
     D2D1_ROUNDED_RECT, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_SEMI_BOLD,
-    DWRITE_TEXT_METRICS,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{
@@ -93,9 +92,15 @@ use crate::tray;
 // Sizes are in DIPs (Nectar's CSS pixels) and multiplied by the monitor scale.
 /// The box each icon sits in (Nectar's 36 px icon slot).
 const TILE: f32 = 36.0;
-/// Share of the box the visible part of an icon fills (Nectar's icon-only look:
-/// 30 px icons in 36 px slots, no tile behind them).
-const ICON_FILL: f32 = 0.83;
+/// Share of the box the visible part of an icon fills at rest: 23 px in the
+/// 36 px slot, so magnified icons stay about inside the bar.
+const ICON_FILL: f32 = 0.64;
+/// With boxes behind the icons (Nectar's default look) hovering grows the icon
+/// inside its box, which keeps its size, so nothing spills out of the bar: up
+/// to this share of the box.
+const TILED_MAX_FILL: f32 = 0.9;
+/// Nectar's box: 12 px corners on 36 px.
+const TILE_RADIUS: f32 = 12.0;
 /// How many neighboring icons the magnification reaches.
 const REACH: f32 = 2.4;
 const GAP: f32 = 12.0;
@@ -490,6 +495,8 @@ pub struct Dock {
     surface: Surface,
     brush: ID2D1SolidColorBrush,
     dwrite: IDWriteFactory,
+    /// Text layouts kept between frames.
+    texts: crate::text::TextCache,
     label_format: IDWriteTextFormat,
     time_format: IDWriteTextFormat,
     /// Segoe Fluent Icons, for the show-desktop button.
@@ -619,6 +626,7 @@ impl Dock {
                 time_format: text_format(&dwrite, 12.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 glyph_format: glyph_format(&dwrite, 14.0)?,
                 dwrite,
+                texts: Default::default(),
                 items: Vec::new(),
                 icon_cache: HashMap::new(),
                 names: HashMap::new(),
@@ -1183,17 +1191,7 @@ impl Dock {
     }
 
     fn text_size(&self, text: &str, format: &IDWriteTextFormat) -> (f32, f32) {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            match self.dwrite.CreateTextLayout(&utf16, format, 1000.0, 200.0) {
-                Ok(layout) => {
-                    let mut m = DWRITE_TEXT_METRICS::default();
-                    let _ = layout.GetMetrics(&mut m);
-                    (m.width, m.height)
-                }
-                Err(_) => (0.0, 0.0),
-            }
-        }
+        self.texts.size(&self.dwrite, text, format)
     }
 
     fn measure_clock(&mut self) {
@@ -1224,7 +1222,8 @@ impl Dock {
             } else if i > 0 {
                 x += gap * share;
             }
-            let size = tile * share * if magnified { item.scale.value } else { 1.0 };
+            let grow = if magnified && !self.settings.tiles { item.scale.value } else { 1.0 };
+            let size = tile * share * grow;
             slots.push(Slot { x, size });
             x += size;
         }
@@ -1651,6 +1650,15 @@ impl Dock {
                     let base = rect(slot.x, layout.icon_bottom - slot.size, slot.x + slot.size, layout.icon_bottom);
                     let tile = scale_rect(base, visible);
                     let opacity = item.opacity() * content;
+                    // With boxes, the icon grows inside its box instead of the
+                    // box growing: up to 90% of it at the highest magnification.
+                    let tile = if self.settings.tiles {
+                        let lift = (item.scale.value - 1.0).max(0.0);
+                        self.draw_box(tile, lift, opacity);
+                        scale_rect(tile, (1.0 + lift * 0.8).min(TILED_MAX_FILL / ICON_FILL))
+                    } else {
+                        tile
+                    };
                     match (item.kind, &item.icon) {
                         (Kind::Start, _) => self.draw_start(tile, opacity),
                         (Kind::App, Some(icon)) => draw_icon(&rt, icon, tile, opacity),
@@ -1746,6 +1754,53 @@ impl Dock {
     }
 
     /// The four-pane Windows logo.
+    /// Nectar's box behind an icon: a 135° gradient from 20% to 5% white
+    /// (4% to 1% black on light themes, with a faint edge). `lift` is how far
+    /// the icon is magnified (0 at rest); the box brightens a little with it.
+    fn draw_box(&self, r: D2D_RECT_F, lift: f32, opacity: f32) {
+        let s = self.scale;
+        let light = settings::palette().light;
+        let (from, to) = if light { (0.07, 0.025) } else { (0.20, 0.05) };
+        let boost = 1.0 + lift.min(0.5) * 0.8;
+        let (ir, ig, ib) = settings::palette().ink;
+        let radius = TILE_RADIUS * s * (r.right - r.left) / (TILE * s);
+        let shape = D2D1_ROUNDED_RECT { rect: r, radiusX: radius, radiusY: radius };
+        unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP { position: 0.0, color: rgba(ir, ig, ib, from * boost * opacity) },
+                D2D1_GRADIENT_STOP { position: 1.0, color: rgba(ir, ig, ib, to * boost * opacity) },
+            ];
+            let rt = &self.surface.rt;
+            let filled = rt
+                .CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)
+                .and_then(|collection| {
+                    rt.CreateLinearGradientBrush(
+                        &D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                            startPoint: pt(r.left, r.top),
+                            endPoint: pt(r.right, r.bottom),
+                        },
+                        None,
+                        &collection,
+                    )
+                })
+                .map(|brush| rt.FillRoundedRectangle(&shape, &brush))
+                .is_ok();
+            if !filled {
+                self.fill_rounded(r, radius, rgba(ir, ig, ib, (from + to) / 2.0 * boost * opacity));
+            }
+            if light {
+                self.brush.SetColor(&rgba(ir, ig, ib, 0.08 * opacity));
+                let inset = 0.5 * s;
+                let edge = D2D1_ROUNDED_RECT {
+                    rect: rect(r.left + inset, r.top + inset, r.right - inset, r.bottom - inset),
+                    radiusX: radius,
+                    radiusY: radius,
+                };
+                rt.DrawRoundedRectangle(&edge, &self.brush, s, None);
+            }
+        }
+    }
+
     fn draw_start(&self, r: D2D_RECT_F, opacity: f32) {
         // Nectar's icon-only start icon: 24 px in the 36 px slot.
         let side = (r.right - r.left) * 0.62;
@@ -1822,9 +1877,8 @@ impl Dock {
     }
 
     fn draw_text(&self, text: &str, format: &IDWriteTextFormat, origin: Vector2, color: D2D1_COLOR_F) {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
         unsafe {
-            if let Ok(layout) = self.dwrite.CreateTextLayout(&utf16, format, 1000.0, 200.0) {
+            if let Some(layout) = self.texts.free(&self.dwrite, text, format) {
                 self.brush.SetColor(&color);
                 self.surface.rt.DrawTextLayout(origin, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
@@ -2198,7 +2252,20 @@ impl Dock {
         dock.mouse = Some((slot.x + slot.size / 2.0 + 6.0, layout.icon_bottom - 10.0));
         dock.update_targets();
         step(&mut dock, 40);
+        if std::env::var_os("POLLEN_BENCH").is_some() {
+            let t = Instant::now();
+            for _ in 0..300 {
+                dock.render();
+            }
+            println!("BENCH dock render {:.3} ms/frame ({}x{})", t.elapsed().as_secs_f64() * 1000.0 / 300.0, dock.surface.width, dock.surface.height);
+        }
         let path = format!("{dir}\\dock.png");
+        dock.surface.save_png(&path)?;
+        println!("saved {path}");
+        // The same with boxes behind the icons.
+        dock.settings.tiles = true;
+        step(&mut dock, 40);
+        let path = format!("{dir}\\dock-boxes.png");
         dock.surface.save_png(&path)?;
         println!("saved {path}");
         Ok(())

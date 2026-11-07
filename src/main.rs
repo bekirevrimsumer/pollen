@@ -18,6 +18,7 @@ mod render;
 mod settings;
 mod shell;
 mod taskbar;
+mod text;
 mod tray;
 mod update;
 mod util;

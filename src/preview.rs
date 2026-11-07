@@ -21,7 +21,6 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_WEIGHT_MEDIUM,
-    DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER, DWRITE_WORD_WRAPPING_NO_WRAP,
 };
 use windows::Win32::Graphics::Dwm::{
     DwmQueryThumbnailSourceSize, DwmRegisterThumbnail, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
@@ -105,6 +104,8 @@ struct Preview {
     surface: Surface,
     brush: ID2D1SolidColorBrush,
     dwrite: IDWriteFactory,
+    /// Text layouts kept between frames.
+    texts: crate::text::TextCache,
     title_format: IDWriteTextFormat,
     close_format: IDWriteTextFormat,
     scale: f32,
@@ -257,6 +258,7 @@ fn create() -> Result<()> {
             title_format: text_format(&dwrite, w!("Segoe UI Variable Text"), 12.0, DWRITE_FONT_WEIGHT_MEDIUM)?,
             close_format: text_format(&dwrite, w!("Segoe Fluent Icons"), 8.0, DWRITE_FONT_WEIGHT_NORMAL)?,
             dwrite,
+            texts: Default::default(),
             scale: 0.0,
             key: None,
             name: String::new(),
@@ -424,10 +426,14 @@ impl Preview {
         rect(r.left + ITEM_PAD * s, r.top + ITEM_PAD * s, r.right - ITEM_PAD * s, r.top + (ITEM_PAD + THUMB_HEIGHT) * s)
     }
 
+    /// At the end of the title row: Windows draws the live thumbnail over the
+    /// card, so nothing of ours may sit on the thumbnail.
     fn close_rect(&self, i: usize) -> D2D_RECT_F {
         let s = self.scale;
         let r = self.item_rect(i);
-        rect(r.right - 7.0 * s - CLOSE * s, r.top + 7.0 * s, r.right - 7.0 * s, r.top + 7.0 * s + CLOSE * s)
+        let cy = self.thumb_rect(i).bottom + (LABEL_GAP + LABEL_HEIGHT / 2.0) * s;
+        let right = r.right - (ITEM_PAD - 2.0) * s;
+        rect(right - CLOSE * s, cy - CLOSE * s / 2.0, right, cy + CLOSE * s / 2.0)
     }
 
     fn hit(&self, x: f32, y: f32) -> Option<Hit> {
@@ -545,32 +551,12 @@ impl Preview {
     }
 
     fn text_size(&self, text: &str, format: &IDWriteTextFormat) -> (f32, f32) {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            match self.dwrite.CreateTextLayout(&utf16, format, 2000.0, 200.0) {
-                Ok(layout) => {
-                    let mut m = DWRITE_TEXT_METRICS::default();
-                    let _ = layout.GetMetrics(&mut m);
-                    (m.width, m.height)
-                }
-                Err(_) => (0.0, 0.0),
-            }
-        }
+        self.texts.size(&self.dwrite, text, format)
     }
 
     fn text(&self, text: &str, format: &IDWriteTextFormat, x: f32, y: f32, color: D2D1_COLOR_F, max_width: f32) {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let Some(layout) = self.texts.line(&self.dwrite, text, format, max_width) else { return };
         unsafe {
-            let Ok(layout) = self.dwrite.CreateTextLayout(&utf16, format, max_width.max(1.0), 200.0) else { return };
-            let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            if let Ok(sign) = self.dwrite.CreateEllipsisTrimmingSign(format) {
-                let trimming = DWRITE_TRIMMING {
-                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                    delimiter: 0,
-                    delimiterCount: 0,
-                };
-                let _ = layout.SetTrimming(&trimming, &sign);
-            }
             self.brush.SetColor(&color);
             self.surface.rt.DrawTextLayout(Vector2 { X: x, Y: y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
@@ -633,7 +619,8 @@ impl Preview {
                 let title = if entry.title.is_empty() { &self.name } else { &entry.title };
                 let tx = item.left + ITEM_PAD * s + icon + 6.0 * s;
                 let (_, th) = self.text_size(title, &self.title_format);
-                self.text(title, &self.title_format, tx, ly + (LABEL_HEIGHT * s - th) / 2.0, ink(0.9), item.right - ITEM_PAD * s - tx);
+                let room = self.close_rect(i).left - 4.0 * s - tx;
+                self.text(title, &self.title_format, tx, ly + (LABEL_HEIGHT * s - th) / 2.0, ink(0.9), room);
 
                 // The close button shows on the hovered card.
                 if item_hot {

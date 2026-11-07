@@ -34,8 +34,8 @@ use windows::Win32::Graphics::Direct2D::{
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED, DWRITE_FONT_STRETCH_NORMAL,
     DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_WEIGHT_NORMAL,
-    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS, DWRITE_TRIMMING, DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-    DWRITE_WORD_WRAPPING_NO_WRAP,
+    DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_METRICS,
+    DWRITE_WORD_WRAPPING_WRAP,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
@@ -176,6 +176,7 @@ const ICON_RIGHT: char = '\u{E76C}';
 const ICON_PIN: char = '\u{E718}';
 const ICON_SIZE: char = '\u{E740}';
 const ICON_ZOOM: char = '\u{E71E}';
+const ICON_TILES: char = '\u{ECA5}';
 const ICON_COLOR: char = '\u{E790}';
 const ICON_POWER: char = '\u{E7E8}';
 const ICON_PLACE: char = '\u{E81D}';
@@ -310,6 +311,7 @@ enum Choice {
     Mode,
     Size,
     Magnify,
+    Tiles,
     Autostart,
     Language,
     Updates,
@@ -317,10 +319,11 @@ enum Choice {
 }
 
 impl Choice {
-    const ALL: [Choice; 7] = [
+    const ALL: [Choice; 8] = [
         Choice::Mode,
         Choice::Size,
         Choice::Magnify,
+        Choice::Tiles,
         Choice::Autostart,
         Choice::Notifications,
         Choice::Updates,
@@ -332,6 +335,7 @@ impl Choice {
             Choice::Mode => ICON_PIN,
             Choice::Size => ICON_SIZE,
             Choice::Magnify => ICON_ZOOM,
+            Choice::Tiles => ICON_TILES,
             Choice::Autostart => ICON_POWER,
             Choice::Language => ICON_LANGUAGE,
             Choice::Updates => ICON_UPDATE,
@@ -344,6 +348,7 @@ impl Choice {
             Choice::Mode => t("Dock modu", "Dock mode"),
             Choice::Size => t("Dock boyutu", "Dock size"),
             Choice::Magnify => t("Büyütme", "Magnify"),
+            Choice::Tiles => t("Simge kutuları", "Icon boxes"),
             Choice::Autostart => t("Windows ile aç", "Autostart"),
             Choice::Language => t("Dil", "Language"),
             Choice::Updates => t("Güncellemeler", "Updates"),
@@ -351,11 +356,55 @@ impl Choice {
         }
     }
 
+    /// What an option does, for its tooltip; None where the label says it all.
+    fn hint(self, i: usize) -> Option<&'static str> {
+        Some(match (self, i) {
+            (Choice::Mode, 0) => t(
+                "Dock hep görünür; ekranın altını kendine ayırır, pencereler onun üstünde biter",
+                "The dock always shows and keeps the bottom strip, like the taskbar",
+            ),
+            (Choice::Mode, 1) => t(
+                "Bir pencere dock'a değince gizlenir; fareyi ekranın altına götürünce açılır",
+                "Hides when a window touches it; move the mouse to the bottom edge to show it",
+            ),
+            (Choice::Mode, 2) => t(
+                "Hep gizli; yalnızca fareyi ekranın altına götürünce açılır",
+                "Always hidden; shows only when the mouse reaches the bottom edge",
+            ),
+            (Choice::Size, _) => t("Simgeler, saat ve çubuk birlikte büyür", "Icons, clock and bar together"),
+            (Choice::Magnify, 0) => t("Simgeler fareyle büyümez", "Icons don't grow under the mouse"),
+            (Choice::Magnify, _) => t(
+                "Farenin altındaki simge ve komşuları büyür",
+                "The icon under the mouse and its neighbors grow",
+            ),
+            (Choice::Tiles, 0) => t("Simgeler çubukta tek başına durur", "Icons sit on the bar by themselves"),
+            (Choice::Tiles, _) => t(
+                "Her simge yuvarlak bir kutuda; büyütünce simge kutusunun içinde büyür",
+                "Each icon sits in a rounded box; magnified icons grow inside it",
+            ),
+            (Choice::Autostart, 1) => t("Windows açılınca Pollen da başlar", "Pollen starts with Windows"),
+            (Choice::Autostart, _) => t("Pollen'ı kendin açarsın", "You start Pollen yourself"),
+            (Choice::Notifications, 1) => t(
+                "Yeni Windows bildirimleri kapalı notch'ta birkaç saniye görünür (tam ekran oyunlarda değil)",
+                "New Windows notifications show on the closed notch for a few seconds (not over fullscreen games)",
+            ),
+            (Choice::Notifications, _) => t("Bildirimler yalnızca Windows'ta görünür", "Notifications show only in Windows"),
+            (Choice::Updates, 1) => t(
+                "Günde bir kez GitHub'da yeni sürüme bakar; kurmak için senin tıklaman gerekir",
+                "Looks for a new version on GitHub once a day; it installs only when you click",
+            ),
+            (Choice::Updates, _) => t("Yeni sürümlere bakılmaz", "Pollen never looks for new versions"),
+            (Choice::Language, 0) => t("Windows'un diliyle aynı", "The same as Windows"),
+            _ => return None,
+        })
+    }
+
     fn options(self) -> Vec<&'static str> {
         match self {
             Choice::Mode => DockMode::ALL.map(|m| m.label()).to_vec(),
             Choice::Size => DockSize::ALL.map(|m| m.label()).to_vec(),
             Choice::Magnify => Magnify::ALL.map(|m| m.label()).to_vec(),
+            Choice::Tiles => vec![t("Kapalı", "Off"), t("Açık", "On")],
             Choice::Autostart => vec![t("Kapalı", "Off"), t("Açık", "On")],
             Choice::Language => settings::Language::ALL.map(|l| l.label()).to_vec(),
             Choice::Updates => vec![t("Kapalı", "Off"), t("Denetle", "Check")],
@@ -369,6 +418,7 @@ impl Choice {
             Choice::Mode => DockMode::ALL.iter().position(|m| *m == s.dock_mode),
             Choice::Size => DockSize::ALL.iter().position(|m| *m == s.dock_size),
             Choice::Magnify => Magnify::ALL.iter().position(|m| *m == s.magnify),
+            Choice::Tiles => Some(s.tiles as usize),
             Choice::Autostart => Some(autostart as usize),
             Choice::Language => settings::Language::ALL.iter().position(|l| *l == s.language),
             Choice::Updates => Some(s.check_updates as usize),
@@ -382,6 +432,7 @@ impl Choice {
             Choice::Mode => s.dock_mode = DockMode::ALL[i],
             Choice::Size => s.dock_size = DockSize::ALL[i],
             Choice::Magnify => s.magnify = Magnify::ALL[i],
+            Choice::Tiles => s.tiles = i == 1,
             Choice::Autostart => {}
             Choice::Language => s.language = settings::Language::ALL[i],
             Choice::Updates => s.check_updates = i == 1,
@@ -579,6 +630,8 @@ pub struct Notch {
     surface: Surface,
     brush: ID2D1SolidColorBrush,
     dwrite: IDWriteFactory,
+    /// Text layouts kept between frames.
+    texts: crate::text::TextCache,
     time_format: IDWriteTextFormat,
     date_format: IDWriteTextFormat,
     title_format: IDWriteTextFormat,
@@ -724,6 +777,7 @@ impl Notch {
                 icon_format: formats.icon,
                 tab_icon_format: formats.tab_icon,
                 dwrite,
+                texts: Default::default(),
                 scale: 1.0,
                 origin: (0, 0),
                 open: Spring::new(0.0),
@@ -1713,40 +1767,24 @@ impl Notch {
             self.animating = false;
             self.last_tick = None;
             pacer::stop(self.hwnd);
+            // Closed, the panel's lines are not needed until it opens again.
+            if self.open.target == 0.0 {
+                self.texts.clear();
+            }
         }
     }
 
     // ---- drawing ---------------------------------------------------------------
 
     fn text_size(&self, text: &str, format: &IDWriteTextFormat) -> (f32, f32) {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
-        unsafe {
-            match self.dwrite.CreateTextLayout(&utf16, format, 2000.0, 200.0) {
-                Ok(layout) => {
-                    let mut m = DWRITE_TEXT_METRICS::default();
-                    let _ = layout.GetMetrics(&mut m);
-                    (m.width, m.height)
-                }
-                Err(_) => (0.0, 0.0),
-            }
-        }
+        self.texts.size(&self.dwrite, text, format)
     }
 
     /// Draws `text` with its top-left at `origin`, cut off with an ellipsis past
     /// `max_width`.
     fn text(&self, text: &str, format: &IDWriteTextFormat, origin: Vector2, color: D2D1_COLOR_F, max_width: f32) {
-        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let Some(layout) = self.texts.line(&self.dwrite, text, format, max_width) else { return };
         unsafe {
-            let Ok(layout) = self.dwrite.CreateTextLayout(&utf16, format, max_width.max(1.0), 200.0) else { return };
-            let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
-            if let Ok(sign) = self.dwrite.CreateEllipsisTrimmingSign(format) {
-                let trimming = DWRITE_TRIMMING {
-                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                    delimiter: 0,
-                    delimiterCount: 0,
-                };
-                let _ = layout.SetTrimming(&trimming, &sign);
-            }
             self.brush.SetColor(&color);
             self.surface.rt.DrawTextLayout(origin, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
@@ -2701,6 +2739,18 @@ impl Notch {
             }
         }
 
+        // The hovered settings option's explanation, under its row.
+        if let Some(Control::Choice(choice, i)) = hovered.clone() {
+            let r = self
+                .controls(island)
+                .into_iter()
+                .find(|(_, c)| c == &Control::Choice(choice, i))
+                .map(|(r, _)| r);
+            if let (Some(r), Some(hint)) = (r, choice.hint(i)) {
+                self.draw_hint(hint, r, island, alpha);
+            }
+        }
+
         // The hovered button's name, under its row.
         if let Some(Control::Button(button)) = &hovered {
             let r = self
@@ -2719,6 +2769,46 @@ impl Notch {
                 self.fill_rounded(bubble, 6.0 * s, rgba(0.0, 0.0, 0.0, 0.8 * alpha));
                 self.text(label, &self.small_format, pt(left + pad_x, top + pad_y), pure_white(0.95 * alpha), lw + 4.0);
             }
+        }
+    }
+
+    /// A wrapped explanation in the dark tooltip bubble, under `r` (or above
+    /// it near the island's bottom), kept inside the island.
+    fn draw_hint(&self, text: &str, r: D2D_RECT_F, island: D2D_RECT_F, alpha: f32) {
+        let s = self.scale;
+        let utf16: Vec<u16> = text.encode_utf16().collect();
+        let (pad_x, pad_y) = (9.0 * s, 5.0 * s);
+        let room = 300.0 * s;
+        unsafe {
+            let Ok(layout) = self.dwrite.CreateTextLayout(&utf16, &self.small_format, room, 400.0 * s) else { return };
+            let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+            let mut m = DWRITE_TEXT_METRICS::default();
+            let _ = layout.GetMetrics(&mut m);
+            // Even lines: narrow the box while the text keeps its line count,
+            // so no word is left alone on the last line.
+            let lines = m.lineCount;
+            let mut width = m.width;
+            while lines > 1 && width > 120.0 * s {
+                let _ = layout.SetMaxWidth(width - 8.0 * s);
+                let mut n = DWRITE_TEXT_METRICS::default();
+                let _ = layout.GetMetrics(&mut n);
+                if n.lineCount != lines {
+                    break;
+                }
+                width -= 8.0 * s;
+            }
+            let _ = layout.SetMaxWidth(width + 1.0);
+            let _ = layout.GetMetrics(&mut m);
+            let (w, h) = (m.width + pad_x * 2.0, m.height + pad_y * 2.0);
+            let cx = (r.left + r.right) / 2.0;
+            let left = (cx - w / 2.0).min(island.right - 6.0 * s - w).max(island.left + 6.0 * s);
+            let below = r.bottom + 5.0 * s;
+            let top = if below + h > island.bottom - 6.0 * s { r.top - 5.0 * s - h } else { below };
+            self.fill_rounded(rect(left, top, left + w, top + h), 6.0 * s, rgba(0.0, 0.0, 0.0, 0.85 * alpha));
+            self.brush.SetColor(&pure_white(0.95 * alpha));
+            self.surface
+                .rt
+                .DrawTextLayout(pt(left + pad_x, top + pad_y), &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
     }
 
@@ -3261,6 +3351,34 @@ impl Notch {
             n.sync_panel_height(false);
             n.render();
             save(&n, name)?;
+        }
+        // A settings option's explanation: the mouse over Smart, then Notifications.
+        n.tab = SETTINGS_TAB;
+        n.sync_panel_height(false);
+        for (choice, i, name) in [(Choice::Mode, 1, "settings-hint"), (Choice::Notifications, 1, "settings-hint-low")] {
+            let (island, ..) = n.island();
+            if let Some((r, _)) = n.controls(island).into_iter().find(|(_, c)| *c == Control::Choice(choice, i)) {
+                n.mouse = Some(((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0));
+                n.render();
+                save(&n, name)?;
+            }
+        }
+        n.mouse = None;
+        if std::env::var_os("POLLEN_BENCH").is_some() {
+            for (tab, name) in [(MUSIC_TAB, "music"), (CONTROL_CENTER_TAB, "control-center"), (SETTINGS_TAB, "settings")] {
+                n.tab = tab;
+                n.sync_panel_height(false);
+                let t = Instant::now();
+                for _ in 0..300 {
+                    n.render();
+                }
+                println!("BENCH notch open {name} {:.3} ms/frame ({}x{})", t.elapsed().as_secs_f64() * 1000.0 / 300.0, n.surface.width, n.surface.height);
+            }
+            let t = Instant::now();
+            for _ in 0..300 {
+                n.render_bars(true);
+            }
+            println!("BENCH notch level bars {:.3} ms/frame", t.elapsed().as_secs_f64() * 1000.0 / 300.0);
         }
         // The timer: running with 4:32 left, in its tab and on the closed island.
         n.clockwork.mode = ClockMode::Timer;

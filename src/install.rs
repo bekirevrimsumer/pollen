@@ -400,6 +400,10 @@ fn uninstall_flow() {
             let _ = std::fs::remove_dir_all(PathBuf::from(appdata).join("Pollen"));
         }
     }
+    // Kept icons are only a cache.
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        let _ = std::fs::remove_dir_all(PathBuf::from(local).join("Pollen"));
+    }
     // This program is running from the folder; a short-lived cmd removes it
     // once this process has exited.
     if let Some(dir) = install_dir() {

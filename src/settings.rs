@@ -113,8 +113,8 @@ impl Magnify {
     pub fn scale(self) -> f32 {
         match self {
             Magnify::Off => 1.0,
-            Magnify::Low => 1.3,
-            Magnify::High => 1.5,
+            Magnify::Low => 1.35,
+            Magnify::High => 1.6,
         }
     }
 
@@ -400,6 +400,8 @@ pub struct Settings {
     pub check_updates: bool,
     /// Show new Windows notifications on the notch for a moment.
     pub notifications: bool,
+    /// Nectar's boxes behind the dock's icons.
+    pub tiles: bool,
 }
 
 impl Default for Settings {
@@ -413,6 +415,7 @@ impl Default for Settings {
             language: Language::Auto,
             check_updates: true,
             notifications: true,
+            tiles: false,
         }
     }
 }
@@ -438,6 +441,7 @@ fn read_file() -> Settings {
             "language" => settings.language = Language::parse(value).unwrap_or(settings.language),
             "check-updates" => settings.check_updates = value.trim() != "off",
             "notifications" => settings.notifications = value.trim() != "off",
+            "icon-tiles" => settings.tiles = value.trim() != "off",
             "opacity" => {
                 if let Ok(v) = value.trim().parse::<f32>() {
                     settings.opacity = (v / 100.0).clamp(MIN_OPACITY, 1.0);
@@ -526,7 +530,7 @@ pub fn write_file(settings: &Settings) {
         let _ = std::fs::write(
             p,
             format!(
-                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\nnotifications={}\n",
+                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\nnotifications={}\nicon-tiles={}\n",
                 settings.dock_mode.key(),
                 settings.dock_size.key(),
                 settings.magnify.key(),
@@ -534,7 +538,8 @@ pub fn write_file(settings: &Settings) {
                 settings.theme.key(),
                 settings.language.key(),
                 if settings.check_updates { "on" } else { "off" },
-                if settings.notifications { "on" } else { "off" }
+                if settings.notifications { "on" } else { "off" },
+                if settings.tiles { "on" } else { "off" }
             ),
         );
     }
