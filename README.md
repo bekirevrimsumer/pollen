@@ -13,6 +13,16 @@ Task Manager, one 1 MB program.
 
 <table>
   <tr>
+    <td colspan="2" align="center"><img src="docs/screenshots/launcher.png" alt="Launcher"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/launcher-calc.png" alt="Launcher: a sum"></td>
+    <td><img src="docs/screenshots/launcher-command.png" alt="Launcher: a command"></td>
+  </tr>
+  <tr>
+    <td colspan="2" align="center">The launcher (Alt+Space): apps, recent files, sums and commands</td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/notch-control-center.png" alt="Control Center"></td>
     <td><img src="docs/screenshots/notch-weather.png" alt="Weather"></td>
   </tr>
@@ -51,8 +61,9 @@ The screenshots are rendered by Pollen itself with made-up data
    admin rights: into `%LOCALAPPDATA%\Programs\Pollen`, with a Start menu shortcut.
 3. To remove it: Settings › Apps › Installed apps › Pollen › Uninstall.
 
-Running a newer `Pollen.exe` offers to update the installed one; your settings and
-pins stay. The program is not signed yet, so SmartScreen may warn the first time
+Pollen looks for a newer release once a day and offers it from its tray icon and the
+Settings tab (turn this off under Settings › Updates). Running a newer `Pollen.exe`
+by hand updates the installed one too; your settings and pins stay. The program is not signed yet, so SmartScreen may warn the first time
 (More info › Run anyway).
 
 Command line: `Pollen.exe --install` installs or updates without asking,
@@ -98,6 +109,17 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Hides while a fullscreen window is the top window on its monitor, even when the
   focus is on another monitor
 - Per-monitor DPI
+
+### Launcher
+
+- **Alt+Space** opens a search box in the middle of the screen (also in the tray
+  icon's menu). It finds every app the Start menu lists, desktop and Store apps
+  alike, by name, word or initials ("vsc" for Visual Studio Code); files opened
+  lately; sums such as `(12+30)*4` (Enter copies the result); and commands: lock,
+  sleep, restart, shut down, sign out, empty the Recycle Bin, Pollen settings.
+  Restarting and the like ask for a second Enter
+- Apps opened from it often rank higher. If another program (PowerToys Run, for
+  one) already uses Alt+Space, the launcher stays in the tray menu only
 
 ### Notch
 

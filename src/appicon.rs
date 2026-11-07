@@ -20,6 +20,8 @@ const ID: u32 = 1;
 pub const CMD_SETTINGS: usize = 1;
 pub const CMD_AUTOSTART: usize = 2;
 pub const CMD_QUIT: usize = 3;
+pub const CMD_LAUNCHER: usize = 4;
+pub const CMD_UPDATE: usize = 5;
 
 fn data(owner: HWND) -> NOTIFYICONDATAW {
     NOTIFYICONDATAW { cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32, hWnd: owner, uID: ID, ..Default::default() }
@@ -51,11 +53,32 @@ pub fn remove(owner: HWND) {
     }
 }
 
+/// A notification from the icon (a click on it comes back as
+/// NIN_BALLOONUSERCLICK).
+pub fn notify(owner: HWND, title: &str, text: &str) {
+    let mut nid = data(owner);
+    nid.uFlags = windows::Win32::UI::Shell::NIF_INFO;
+    let title: Vec<u16> = title.encode_utf16().take(63).collect();
+    let text: Vec<u16> = text.encode_utf16().take(255).collect();
+    nid.szInfoTitle[..title.len()].copy_from_slice(&title);
+    nid.szInfo[..text.len()].copy_from_slice(&text);
+    nid.dwInfoFlags = windows::Win32::UI::Shell::NIIF_INFO;
+    unsafe {
+        let _ = Shell_NotifyIconW(windows::Win32::UI::Shell::NIM_MODIFY, &nid);
+    }
+}
+
 /// The right-click menu at the mouse; returns the chosen command (0 for none).
 pub fn menu(owner: HWND, autostart: bool) -> usize {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return 0 };
         let text = |tr: &'static str, en: &'static str| windows::core::HSTRING::from(crate::i18n::t(tr, en));
+        if let Some(release) = crate::update::available() {
+            let label = windows::core::HSTRING::from(format!("{} {}", crate::i18n::t("Güncelle:", "Update to"), release.version));
+            let _ = AppendMenuW(menu, MF_STRING, CMD_UPDATE, &label);
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        }
+        let _ = AppendMenuW(menu, MF_STRING, CMD_LAUNCHER, &text("Başlatıcı\tAlt+Boşluk", "Launcher\tAlt+Space"));
         let _ = AppendMenuW(menu, MF_STRING, CMD_SETTINGS, &text("Ayarlar", "Settings"));
         let check = if autostart { MF_STRING | MF_CHECKED } else { MF_STRING };
         let _ = AppendMenuW(menu, check, CMD_AUTOSTART, &text("Windows ile başlat", "Start with Windows"));

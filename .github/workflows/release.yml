@@ -1,0 +1,32 @@
+# Builds Pollen.exe when a version tag (v0.1.0, ...) is pushed and attaches it
+# to a GitHub release for that tag.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Name the program
+        shell: pwsh
+        run: Copy-Item target/release/pollen.exe Pollen.exe
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Pollen.exe
+          generate_release_notes: true

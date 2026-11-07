@@ -348,6 +348,8 @@ pub struct Settings {
     pub opacity: f32,
     pub theme: Theme,
     pub language: Language,
+    /// Look for a newer Pollen on GitHub once a day.
+    pub check_updates: bool,
 }
 
 impl Default for Settings {
@@ -359,6 +361,7 @@ impl Default for Settings {
             opacity: 0.9,
             theme: Theme::Midnight,
             language: Language::Auto,
+            check_updates: true,
         }
     }
 }
@@ -382,6 +385,7 @@ fn read_file() -> Settings {
             "magnify" => settings.magnify = Magnify::parse(value).unwrap_or(settings.magnify),
             "theme" => settings.theme = Theme::parse(value).unwrap_or(settings.theme),
             "language" => settings.language = Language::parse(value).unwrap_or(settings.language),
+            "check-updates" => settings.check_updates = value.trim() != "off",
             "opacity" => {
                 if let Ok(v) = value.trim().parse::<f32>() {
                     settings.opacity = (v / 100.0).clamp(MIN_OPACITY, 1.0);
@@ -470,13 +474,14 @@ pub fn write_file(settings: &Settings) {
         let _ = std::fs::write(
             p,
             format!(
-                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\n",
+                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\n",
                 settings.dock_mode.key(),
                 settings.dock_size.key(),
                 settings.magnify.key(),
                 settings.opacity * 100.0,
                 settings.theme.key(),
-                settings.language.key()
+                settings.language.key(),
+                if settings.check_updates { "on" } else { "off" }
             ),
         );
     }

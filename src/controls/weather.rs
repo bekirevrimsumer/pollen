@@ -13,13 +13,7 @@ use crate::i18n::t;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::Networking::WinHttp::{
-    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable, WinHttpReadData,
-    WinHttpReceiveResponse, WinHttpSendRequest, INTERNET_DEFAULT_HTTPS_PORT, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-    WINHTTP_FLAG_SECURE,
-};
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
 
@@ -228,64 +222,7 @@ pub fn check() -> Option<Weather> {
     fetch(lat, lon, &city)
 }
 
-/// GET over HTTPS with WinHTTP's defaults (the system proxy, normal
-/// certificate validation), returning the body as JSON.
-fn get_json(url: &str) -> Option<serde_json::Value> {
-    let rest = url.strip_prefix("https://")?;
-    let (host, path) = rest.split_once('/').map(|(h, p)| (h, format!("/{p}"))).unwrap_or((rest, "/".to_string()));
-    let host_w = crate::util::wide(host);
-    let path_w = crate::util::wide(&path);
-    unsafe {
-        let session = WinHttpOpen(w!("Pollen"), WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, PCWSTR::null(), PCWSTR::null(), 0);
-        if session.is_null() {
-            return None;
-        }
-        let connect = WinHttpConnect(session, crate::util::pcwstr(&host_w), INTERNET_DEFAULT_HTTPS_PORT, 0);
-        let request = if connect.is_null() {
-            std::ptr::null_mut()
-        } else {
-            WinHttpOpenRequest(
-                connect,
-                w!("GET"),
-                crate::util::pcwstr(&path_w),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                std::ptr::null(),
-                WINHTTP_FLAG_SECURE,
-            )
-        };
-        let mut body = Vec::new();
-        let ok = !request.is_null()
-            && WinHttpSendRequest(request, None, None, 0, 0, 0).is_ok()
-            && WinHttpReceiveResponse(request, std::ptr::null_mut()).is_ok();
-        if ok {
-            loop {
-                let mut available = 0u32;
-                if WinHttpQueryDataAvailable(request, &mut available).is_err() || available == 0 {
-                    break;
-                }
-                let mut chunk = vec![0u8; available as usize];
-                let mut read = 0u32;
-                if WinHttpReadData(request, chunk.as_mut_ptr() as *mut _, available, &mut read).is_err() || read == 0 {
-                    break;
-                }
-                body.extend_from_slice(&chunk[..read as usize]);
-                if body.len() > 1_000_000 {
-                    break;
-                }
-            }
-        }
-        for handle in [request, connect, session] {
-            if !handle.is_null() {
-                let _ = WinHttpCloseHandle(handle);
-            }
-        }
-        if !ok {
-            return None;
-        }
-        serde_json::from_slice(&body).ok()
-    }
-}
+use crate::net::get_json;
 
 fn number(v: &serde_json::Value) -> Option<f64> {
     v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok()))

@@ -170,6 +170,7 @@ const ICON_POWER: char = '\u{E7E8}';
 const ICON_PLACE: char = '\u{E81D}';
 const ICON_THEME: char = '\u{E771}';
 const ICON_LANGUAGE: char = '\u{E774}';
+const ICON_UPDATE: char = '\u{E895}';
 const ICON_CLOCK: char = '\u{E823}';
 const ICON_INFO: char = '\u{E946}';
 // Segoe Fluent Icons has no rain or snow; DirectWrite falls back to Segoe UI Symbol.
@@ -282,10 +283,12 @@ enum Choice {
     Magnify,
     Autostart,
     Language,
+    Updates,
 }
 
 impl Choice {
-    const ALL: [Choice; 5] = [Choice::Mode, Choice::Size, Choice::Magnify, Choice::Autostart, Choice::Language];
+    const ALL: [Choice; 6] =
+        [Choice::Mode, Choice::Size, Choice::Magnify, Choice::Autostart, Choice::Updates, Choice::Language];
 
     fn icon(self) -> char {
         match self {
@@ -294,6 +297,7 @@ impl Choice {
             Choice::Magnify => ICON_ZOOM,
             Choice::Autostart => ICON_POWER,
             Choice::Language => ICON_LANGUAGE,
+            Choice::Updates => ICON_UPDATE,
         }
     }
 
@@ -304,6 +308,7 @@ impl Choice {
             Choice::Magnify => t("Büyütme", "Magnify"),
             Choice::Autostart => t("Windows ile aç", "Autostart"),
             Choice::Language => t("Dil", "Language"),
+            Choice::Updates => t("Güncellemeler", "Updates"),
         }
     }
 
@@ -314,6 +319,7 @@ impl Choice {
             Choice::Magnify => Magnify::ALL.map(|m| m.label()).to_vec(),
             Choice::Autostart => vec![t("Kapalı", "Off"), t("Açık", "On")],
             Choice::Language => settings::Language::ALL.map(|l| l.label()).to_vec(),
+            Choice::Updates => vec![t("Kapalı", "Off"), t("Denetle", "Check")],
         }
     }
 
@@ -325,6 +331,7 @@ impl Choice {
             Choice::Magnify => Magnify::ALL.iter().position(|m| *m == s.magnify),
             Choice::Autostart => Some(autostart as usize),
             Choice::Language => settings::Language::ALL.iter().position(|l| *l == s.language),
+            Choice::Updates => Some(s.check_updates as usize),
         }
         .unwrap_or(0)
     }
@@ -336,6 +343,7 @@ impl Choice {
             Choice::Magnify => s.magnify = Magnify::ALL[i],
             Choice::Autostart => {}
             Choice::Language => s.language = settings::Language::ALL[i],
+            Choice::Updates => s.check_updates = i == 1,
         }
     }
 }
@@ -374,6 +382,8 @@ enum Control {
     CityField,
     /// Back to the place from the IP address.
     CityAuto,
+    /// Install the newer version (Settings footer).
+    Update,
     CityResult(usize),
 }
 
@@ -1104,6 +1114,9 @@ impl Notch {
             list.push((rect(x0, y, right - 40.0 * s, y + SLIDER_HEIGHT * s), Control::Slider(Slider::Opacity)));
             y += (SLIDER_HEIGHT + 16.0) * s;
             list.push((rect(right - 132.0 * s, y, right, y + 30.0 * s), Control::Quit));
+            if crate::update::available().is_some() {
+                list.push((rect(left, y, right - 140.0 * s, y + 30.0 * s), Control::Update));
+            }
             return list;
         }
         if self.tab != CONTROL_CENTER_TAB {
@@ -1792,10 +1805,20 @@ impl Notch {
         self.text(&title, &self.title_format, pt(left + 24.0 * s, cy - th / 2.0), white(0.9), LABEL_WIDTH * s - 30.0 * s);
         y += (CHOICE_HEIGHT + 10.0) * s;
         y += (SLIDER_HEIGHT + 16.0) * s;
-        let note = format!("Pollen {} · {}", crate::install::VERSION, t("ayarlar kendiliğinden kaydedilir", "settings save themselves"));
-        let note = note.as_str();
-        let (_, nh) = self.text_size(note, &self.small_format);
-        self.text(note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), white(0.4), 245.0 * s);
+        match crate::update::available() {
+            Some(release) => {
+                let hot = self.hovered_control() == Some(Control::Update);
+                let note = format!("↓ Pollen {} {}", release.version, t("hazır · kurmak için tıkla", "is ready · click to install"));
+                let (_, nh) = self.text_size(&note, &self.small_format);
+                let color = if hot { white(1.0) } else { with_alpha(accent(), alpha) };
+                self.text(&note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), color, 245.0 * s);
+            }
+            None => {
+                let note = format!("Pollen {} · {}", crate::install::VERSION, t("ayarlar kendiliğinden kaydedilir", "settings save themselves"));
+                let (_, nh) = self.text_size(&note, &self.small_format);
+                self.text(&note, &self.small_format, pt(left, y + 15.0 * s - nh / 2.0), white(0.4), 245.0 * s);
+            }
+        }
     }
 
     fn draw_calendar(&self, island: D2D_RECT_F, alpha: f32) {
@@ -2220,6 +2243,7 @@ impl Notch {
                     let (_, rh) = self.text_size(&place.region, &self.small_format);
                     self.text(&place.region, &self.small_format, pt(rx, cy - rh / 2.0), white(0.5), r.right - 8.0 * s - rx);
                 }
+                Control::Update => {}
                 Control::Quit => {
                     let hot = hovered == Some(Control::Quit);
                     let pressed = self.pressed == Some(Control::Quit);
@@ -2600,6 +2624,7 @@ impl Notch {
                 }
             }
             Control::Quit => crate::dock::quit(),
+            Control::Update => crate::update::install_available(),
             Control::CityField => self.start_city_edit(),
             Control::CityAuto => {
                 weather::set_place(None);

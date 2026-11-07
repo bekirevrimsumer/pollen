@@ -86,6 +86,17 @@ def main():
     top = H - dock.height + bbox[1]
     save(strip.crop(((W - 1100) // 2, top - 30, (W + 1100) // 2, H)), "dock.png")
 
+    # The launcher, in the middle of the screen.
+    for name in ["launcher", "launcher-calc", "launcher-command"]:
+        if not os.path.exists(os.path.join(folder, f"{name}.png")):
+            continue
+        layer = load(folder, f"{name}.png")
+        canvas = wall.copy()
+        x0, y0 = (W - layer.width) // 2, H // 5
+        canvas.alpha_composite(layer, (x0, y0))
+        l, t, r, b = layer.getbbox()
+        save(crop_around(canvas, (x0 + l, y0 + t, x0 + r, y0 + b), 20), f"{name}.png")
+
     # Each notch state, cropped around it.
     for name in ["closed", "volume", "music", "control-center", "status", "weather", "calendar", "settings"]:
         layer = load(folder, f"notch-{name}.png")

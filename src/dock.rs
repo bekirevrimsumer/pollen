@@ -160,6 +160,8 @@ const WM_SYNC_POLL: u32 = WM_APP + 15;
 const WM_SYNC_PINS: u32 = WM_APP + 16;
 /// Clicks on Pollen's notification area icon.
 const WM_TRAYICON: u32 = WM_APP + 17;
+/// The update check found a newer Pollen.
+const WM_UPDATE: u32 = WM_APP + 18;
 const ABN_POSCHANGED: usize = 1;
 const ABN_FULLSCREENAPP: usize = 2;
 
@@ -678,6 +680,7 @@ impl Dock {
 
             let _ = RegisterShellHookWindow(hwnd);
             crate::appicon::add(hwnd, WM_TRAYICON);
+            crate::update::start(hwnd, WM_UPDATE);
             // Window moves, maximize/restore and minimize decide whether the bar
             // widens (Fixed) or hides (Smart).
             dock._event_hooks = [
@@ -2694,6 +2697,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             match (lparam.0 & 0xFFFF) as u32 {
                 // NIN_SELECT, NIN_KEYSELECT: a left click or Enter.
                 0x0400 | 0x0401 => crate::notch::show_settings(),
+                // NIN_BALLOONUSERCLICK: the "update ready" notification.
+                0x0405 => crate::update::install_available(),
                 // WM_CONTEXTMENU: a right click.
                 0x007B => {
                     let enabled = crate::autostart::is_enabled();
@@ -2704,10 +2709,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                             crate::notch::settings_changed();
                         }
                         crate::appicon::CMD_QUIT => quit(),
+                        crate::appicon::CMD_LAUNCHER => crate::launcher::show(),
+                        crate::appicon::CMD_UPDATE => crate::update::install_available(),
                         _ => {}
                     }
                 }
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_UPDATE => {
+            if let Some(release) = crate::update::available() {
+                let title = format!("Pollen {}", release.version);
+                let text = t("Yeni sürüm hazır. Kurmak için tıkla.", "A new version is ready. Click to install it.");
+                crate::appicon::notify(hwnd, &title, text);
+                crate::notch::settings_changed();
             }
             LRESULT(0)
         }

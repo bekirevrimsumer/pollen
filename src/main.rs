@@ -9,6 +9,8 @@ mod dock;
 mod i18n;
 mod icons;
 mod install;
+mod launcher;
+mod net;
 mod notch;
 mod pacer;
 mod preview;
@@ -17,6 +19,7 @@ mod settings;
 mod shell;
 mod taskbar;
 mod tray;
+mod update;
 mod util;
 
 use windows::core::{w, Result};
@@ -88,6 +91,14 @@ fn main() -> Result<()> {
             println!("peaks: {:?}", meter.peaks());
             return Ok(());
         }
+        if args.iter().any(|a| a == "--check-update") {
+            println!("this: {}  newer: {:?}", install::VERSION, update::check());
+            return Ok(());
+        }
+        if let Some(i) = args.iter().position(|a| a == "--search") {
+            launcher::print_search(args.get(i + 1).map(String::as_str).unwrap_or(""));
+            return Ok(());
+        }
         if let Some(i) = args.iter().position(|a| a == "--demo-shots") {
             let dir = args.get(i + 1).cloned().unwrap_or_else(|| ".".into());
             util::set_demo();
@@ -98,6 +109,7 @@ fn main() -> Result<()> {
                 settings::set(s, false);
             }
             dock::Dock::demo_shots(&dir)?;
+            launcher::demo_shots(&dir)?;
             return notch::Notch::demo_shots(&dir);
         }
         if let Some(i) = args.iter().position(|a| a == "--snapshot") {
@@ -136,6 +148,8 @@ fn main() -> Result<()> {
             taskbar::restore();
         }
         let _dock = dock?;
+        // Alt+Space; false when another program already has it.
+        let _ = launcher::start();
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
