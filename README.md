@@ -120,11 +120,15 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Start button, a clock (click: notifications and calendar) and the taskbar's
   show-desktop button at the right end (in the screen's corner when full width)
 - Click to open, click a running app to focus it, again to minimize, or to cycle its windows
+- Apps open through Explorer, as from the taskbar: they are Explorer's children,
+  not Pollen's (tools that group processes by parent, such as PC Manager, don't
+  count their memory as Pollen's), and they get Explorer's current environment
+  (a PATH changed after Pollen started included)
 - Right-click menu: the app's jump list as on the taskbar (its tasks such as "New
   InPrivate window", its own categories, and recently opened files when Windows'
-  "Show recently opened items" setting is on), then new window, close windows,
-  pin to / remove from the dock, mode,
-  quit. Pins made in Pollen are kept in `%APPDATA%\Pollen\pins.txt`; removing one of
+  "Show recently opened items" setting is on), then new window, close the window
+  (or all of them), pin to / remove from the dock, and a Pollen submenu with the
+  mode and quitting. Pins made in Pollen are kept in `%APPDATA%\Pollen\pins.txt`; removing one of
   Windows' own taskbar pins only hides it from the dock (`hidden-pins.txt`), since
   Windows does not let other apps change its pins
 - An icon in the notification area: click for the Settings tab, right-click for
@@ -150,6 +154,11 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 ### Notch
 
 - An island attached to the top of the primary monitor (Nectar's look and opening)
+- It can sit anywhere along the top edge (drag the open notch by the time or the
+  date in its top row; it snaps to the ends and the middle), or stand on the left
+  or right edge as a tall pill whose panel slides out sideways
+- Settings › Notch › On hover: it hides above the screen and opens when the mouse
+  touches the edge where it sits; notifications and the volume still show
 - Closed: time and date; while something plays, its art and level bars driven by
   the output's real peak meter. Hovered: opens with icon tabs across the top, on
   Music if something plays, else on the Control Center
@@ -185,7 +194,7 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Calendar: a plain month view (Monday first), today highlighted, previous / next
   month. No accounts or calendar sync
 - Settings: the language (Auto follows Windows; Türkçe or English), the dock's mode,
-  size, magnification and icon boxes, starting with Windows (off
+  size, magnification and icon boxes, the notch's edge, place and hiding, starting with Windows (off
   until turned on; a value under the user's `Run` key), the weather's place, the
   theme (Nectar's presets: Midnight, Graphite, Ocean, Forest, Plum, Rose, Ember;
   the light Light, Latte and Mist; or Windows, which follows Windows' accent color

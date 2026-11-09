@@ -41,6 +41,43 @@ impl DockMode {
     }
 }
 
+/// The screen edge the notch sits on.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum NotchEdge {
+    Top,
+    Left,
+    Right,
+}
+
+impl NotchEdge {
+    pub const ALL: [NotchEdge; 3] = [NotchEdge::Top, NotchEdge::Left, NotchEdge::Right];
+
+    fn key(self) -> &'static str {
+        match self {
+            NotchEdge::Top => "top",
+            NotchEdge::Left => "left",
+            NotchEdge::Right => "right",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            NotchEdge::Top => crate::i18n::t("Üstte", "Top"),
+            NotchEdge::Left => crate::i18n::t("Solda", "Left"),
+            NotchEdge::Right => crate::i18n::t("Sağda", "Right"),
+        }
+    }
+
+    fn parse(s: &str) -> Option<NotchEdge> {
+        NotchEdge::ALL.into_iter().find(|e| e.key() == s.trim())
+    }
+
+    /// On the left or the right edge, standing up.
+    pub fn side(self) -> bool {
+        self != NotchEdge::Top
+    }
+}
+
 /// The dock's overall size: icons, bar, clock and all.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum DockSize {
@@ -402,6 +439,14 @@ pub struct Settings {
     pub notifications: bool,
     /// Nectar's boxes behind the dock's icons.
     pub tiles: bool,
+    /// The notch stays above the screen's top edge until the mouse touches it.
+    pub notch_hide: bool,
+    /// Where the notch sits along the top edge: 0 against the left edge, 0.5
+    /// in the middle, 1 against the right edge.
+    pub notch_x: f32,
+    pub notch_edge: NotchEdge,
+    /// Where the notch sits along a side edge: 0 at the top, 1 at the bottom.
+    pub notch_y: f32,
 }
 
 impl Default for Settings {
@@ -416,6 +461,10 @@ impl Default for Settings {
             check_updates: true,
             notifications: true,
             tiles: false,
+            notch_hide: false,
+            notch_x: 0.5,
+            notch_edge: NotchEdge::Top,
+            notch_y: 0.5,
         }
     }
 }
@@ -442,6 +491,18 @@ fn read_file() -> Settings {
             "check-updates" => settings.check_updates = value.trim() != "off",
             "notifications" => settings.notifications = value.trim() != "off",
             "icon-tiles" => settings.tiles = value.trim() != "off",
+            "notch-hide" => settings.notch_hide = value.trim() == "on",
+            "notch-edge" => settings.notch_edge = NotchEdge::parse(value).unwrap_or(settings.notch_edge),
+            "notch-y" => {
+                if let Ok(v) = value.trim().parse::<f32>() {
+                    settings.notch_y = (v / 100.0).clamp(0.0, 1.0);
+                }
+            }
+            "notch-x" => {
+                if let Ok(v) = value.trim().parse::<f32>() {
+                    settings.notch_x = (v / 100.0).clamp(0.0, 1.0);
+                }
+            }
             "opacity" => {
                 if let Ok(v) = value.trim().parse::<f32>() {
                     settings.opacity = (v / 100.0).clamp(MIN_OPACITY, 1.0);
@@ -530,7 +591,7 @@ pub fn write_file(settings: &Settings) {
         let _ = std::fs::write(
             p,
             format!(
-                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\nnotifications={}\nicon-tiles={}\n",
+                "dock-mode={}\ndock-size={}\nmagnify={}\nopacity={:.0}\ntheme={}\nlanguage={}\ncheck-updates={}\nnotifications={}\nicon-tiles={}\nnotch-hide={}\nnotch-x={:.1}\nnotch-edge={}\nnotch-y={:.1}\n",
                 settings.dock_mode.key(),
                 settings.dock_size.key(),
                 settings.magnify.key(),
@@ -539,7 +600,11 @@ pub fn write_file(settings: &Settings) {
                 settings.language.key(),
                 if settings.check_updates { "on" } else { "off" },
                 if settings.notifications { "on" } else { "off" },
-                if settings.tiles { "on" } else { "off" }
+                if settings.tiles { "on" } else { "off" },
+                if settings.notch_hide { "on" } else { "off" },
+                settings.notch_x * 100.0,
+                settings.notch_edge.key(),
+                settings.notch_y * 100.0
             ),
         );
     }

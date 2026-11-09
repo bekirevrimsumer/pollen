@@ -69,7 +69,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterShellHookWindow, RegisterWindowMessageW,
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu,
     EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, GWLP_USERDATA,
-    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MF_CHECKED, MF_GRAYED, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE,
+    HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SW_HIDE, SW_MINIMIZE, SW_SHOWNOACTIVATE, TPM_BOTTOMALIGN, TPM_CENTERALIGN, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
     WM_CAPTURECHANGED, WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NULL,
@@ -1329,7 +1329,9 @@ impl Dock {
                 !self.items[*i].leaving
                     && x >= slot.x - gap / 2.0
                     && x < slot.x + slot.size + gap / 2.0
-                    && y >= layout.icon_bottom - slot.size - 2.0 * self.scale
+                    // The whole height of the bar counts, and a magnified
+                    // icon above it too.
+                    && y >= (layout.icon_bottom - slot.size - 2.0 * self.scale).min(layout.bar.top)
             })
             .map(|(i, _)| Hit::Item(i))
     }
@@ -2577,13 +2579,14 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
     // The items can change while the menu is open (an app closes, the list
     // is re-sorted), so the chosen app is found again by its key afterwards.
     let key = index.map(|i| (&(*dock).items)[i].key.clone());
-    let (can_open, running, pinned) = match index {
+    let (can_open, windows, pinned) = match index {
         Some(i) => {
             let item = &(&(*dock).items)[i];
-            (item.launch.is_some(), !item.windows.is_empty(), item.pinned)
+            (item.launch.is_some(), item.windows.len(), item.pinned)
         }
-        None => (false, false, false),
+        None => (false, 0, false),
     };
+    let running = windows > 0;
 
     let Ok(menu) = CreatePopupMenu() else { return };
     // The app's jump list first, as on the taskbar: its tasks, its own
@@ -2616,25 +2619,31 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
         let _ = AppendMenuW(menu, MF_STRING, CMD_OPEN, &HSTRING::from(open));
     }
     if running {
-        let _ = AppendMenuW(menu, MF_STRING, CMD_CLOSE, &HSTRING::from(t("Pencereleri kapat", "Close windows")));
+        let close = if windows == 1 { t("Pencereyi kapat", "Close window") } else { t("Tüm pencereleri kapat", "Close all windows") };
+        let _ = AppendMenuW(menu, MF_STRING, CMD_CLOSE, &HSTRING::from(close));
     }
     if can_open && pinned {
         let _ = AppendMenuW(menu, MF_STRING, CMD_UNPIN, &HSTRING::from(t("Dock'tan kaldır", "Remove from dock")));
     } else if can_open {
         let _ = AppendMenuW(menu, MF_STRING, CMD_PIN, &HSTRING::from(t("Dock'a sabitle", "Pin to dock")));
     }
-    if can_open || running {
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    }
+    // On an app, Pollen's own items wait in a submenu so the app's come first.
+    let app_menu = index.is_some();
+    let own = if app_menu { CreatePopupMenu().unwrap_or(menu) } else { menu };
     let check = |m: DockMode| if mode == m { MF_STRING | MF_CHECKED } else { MF_STRING };
     let fixed = HSTRING::from(t("Sabit", "Fixed"));
     let smart = HSTRING::from(t("Akıllı (pencere gelince gizlen)", "Smart (hide when a window comes)"));
     let peek = HSTRING::from(t("Göz at (kenara gelince göster)", "Peek (show at the screen edge)"));
-    let _ = AppendMenuW(menu, check(DockMode::Fixed), CMD_MODE_FIXED, &fixed);
-    let _ = AppendMenuW(menu, check(DockMode::Smart), CMD_MODE_SMART, &smart);
-    let _ = AppendMenuW(menu, check(DockMode::Peek), CMD_MODE_PEEK, &peek);
-    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-    let _ = AppendMenuW(menu, MF_STRING, CMD_QUIT, &HSTRING::from(t("Pollen'dan çık", "Quit Pollen")));
+    let _ = AppendMenuW(own, check(DockMode::Fixed), CMD_MODE_FIXED, &fixed);
+    let _ = AppendMenuW(own, check(DockMode::Smart), CMD_MODE_SMART, &smart);
+    let _ = AppendMenuW(own, check(DockMode::Peek), CMD_MODE_PEEK, &peek);
+    let _ = AppendMenuW(own, MF_SEPARATOR, 0, PCWSTR::null());
+    let _ = AppendMenuW(own, MF_STRING, CMD_QUIT, &HSTRING::from(t("Pollen'dan çık", "Quit Pollen")));
+    if own != menu {
+        // The parent menu destroys the submenu with itself.
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_POPUP, own.0 as usize, &HSTRING::from("Pollen"));
+    }
 
     let mut cursor = POINT::default();
     let _ = GetCursorPos(&mut cursor);

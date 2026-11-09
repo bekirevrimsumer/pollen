@@ -46,7 +46,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     ReleaseCapture, SetCapture, SetFocus, TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_CONTROL, VK_LWIN,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetForegroundWindow, GetWindowLongPtrW, SetForegroundWindow, GWL_EXSTYLE, KillTimer, LoadCursorW, RegisterClassExW, SetTimer,
+    CreateWindowExW, DefWindowProcW, GetCursorPos, GetForegroundWindow, SetCursor, IDC_SIZENS, IDC_SIZEWE, WM_SETCURSOR, GetWindowLongPtrW, SetForegroundWindow, GWL_EXSTYLE, KillTimer, LoadCursorW, RegisterClassExW, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_CAPTURECHANGED,
     WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_MOUSEWHEEL,
@@ -59,7 +59,7 @@ use crate::anim::Spring;
 use crate::controls::{audio, battery, displays, media, network, notifications, privacy, system, weather};
 use crate::pacer;
 use crate::render::Surface;
-use crate::settings::{self, DockMode, DockSize, Magnify, Settings};
+use crate::settings::{self, DockMode, DockSize, Magnify, NotchEdge, Settings};
 use crate::i18n::{self, t};
 use crate::shell;
 
@@ -82,7 +82,12 @@ const SLIDER_HEIGHT: f32 = 22.0;
 const LABEL_WIDTH: f32 = 112.0;
 /// Room in the window for the widest the island can get.
 const WINDOW_WIDTH: f32 = OPEN_WIDTH + FLARE * 2.0 + 24.0;
-const WINDOW_HEIGHT: f32 = 540.0;
+const WINDOW_HEIGHT: f32 = 660.0;
+/// The closed island on a side edge: a tall pill (DIPs).
+const SIDE_WIDTH: f32 = 46.0;
+const SIDE_LENGTH: f32 = 176.0;
+/// Moving the notch, it snaps to an edge or the middle this close (DIPs).
+const SNAP: f32 = 28.0;
 
 /// Nectar's Midnight surface; it gets more opaque open (Nectar: +0.12).
 
@@ -177,6 +182,10 @@ const ICON_PIN: char = '\u{E718}';
 const ICON_SIZE: char = '\u{E740}';
 const ICON_ZOOM: char = '\u{E71E}';
 const ICON_TILES: char = '\u{ECA5}';
+const ICON_NOTCH: char = '\u{E737}';
+const ICON_MOVE: char = '\u{E7C2}';
+const ICON_EDGE: char = '\u{E746}';
+const IDENTITY: Matrix3x2 = Matrix3x2 { M11: 1.0, M12: 0.0, M21: 0.0, M22: 1.0, M31: 0.0, M32: 0.0 };
 const ICON_COLOR: char = '\u{E790}';
 const ICON_POWER: char = '\u{E7E8}';
 const ICON_PLACE: char = '\u{E81D}';
@@ -312,6 +321,9 @@ enum Choice {
     Size,
     Magnify,
     Tiles,
+    NotchHide,
+    NotchEdge,
+    NotchPlace,
     Autostart,
     Language,
     Updates,
@@ -319,11 +331,14 @@ enum Choice {
 }
 
 impl Choice {
-    const ALL: [Choice; 8] = [
+    const ALL: [Choice; 11] = [
         Choice::Mode,
         Choice::Size,
         Choice::Magnify,
         Choice::Tiles,
+        Choice::NotchHide,
+        Choice::NotchEdge,
+        Choice::NotchPlace,
         Choice::Autostart,
         Choice::Notifications,
         Choice::Updates,
@@ -336,6 +351,9 @@ impl Choice {
             Choice::Size => ICON_SIZE,
             Choice::Magnify => ICON_ZOOM,
             Choice::Tiles => ICON_TILES,
+            Choice::NotchHide => ICON_NOTCH,
+            Choice::NotchEdge => ICON_EDGE,
+            Choice::NotchPlace => ICON_MOVE,
             Choice::Autostart => ICON_POWER,
             Choice::Language => ICON_LANGUAGE,
             Choice::Updates => ICON_UPDATE,
@@ -349,6 +367,9 @@ impl Choice {
             Choice::Size => t("Dock boyutu", "Dock size"),
             Choice::Magnify => t("Büyütme", "Magnify"),
             Choice::Tiles => t("Simge kutuları", "Icon boxes"),
+            Choice::NotchHide => t("Notch", "Notch"),
+            Choice::NotchEdge => t("Notch kenarı", "Notch edge"),
+            Choice::NotchPlace => t("Notch konumu", "Notch place"),
             Choice::Autostart => t("Windows ile aç", "Autostart"),
             Choice::Language => t("Dil", "Language"),
             Choice::Updates => t("Güncellemeler", "Updates"),
@@ -382,6 +403,23 @@ impl Choice {
                 "Her simge yuvarlak bir kutuda; büyütünce simge kutusunun içinde büyür",
                 "Each icon sits in a rounded box; magnified icons grow inside it",
             ),
+            (Choice::NotchHide, 0) => t(
+                "Saat ve tarihle hep ekranın üstünde durur",
+                "Always at the top of the screen, with the time and date",
+            ),
+            (Choice::NotchHide, _) => t(
+                "Ekranın üstünde gizlenir; fareyi üst kenarda onun yerine götürünce açılır. Bildirimler ve ses göstergesi yine görünür",
+                "Hides above the screen and opens when the mouse touches the top edge where it sits. Notifications and the volume still show",
+            ),
+            (Choice::NotchEdge, 0) => t("Ekranın üst kenarında, Nectar'daki gibi", "On the screen's top edge, as in Nectar"),
+            (Choice::NotchEdge, _) => t(
+                "Ekranın yan kenarında dik durur; açılınca panel yandan çıkar",
+                "Stands on a side edge of the screen; the panel slides out sideways",
+            ),
+            (Choice::NotchPlace, _) => t(
+                "Notch'u açıkken üst satırındaki saatten ya da tarihten tutup sürükleyerek de taşıyabilirsin; uçlara ve ortaya yapışır",
+                "You can also drag the open notch by the time or date in its top row; it snaps to the ends and the middle",
+            ),
             (Choice::Autostart, 1) => t("Windows açılınca Pollen da başlar", "Pollen starts with Windows"),
             (Choice::Autostart, _) => t("Pollen'ı kendin açarsın", "You start Pollen yourself"),
             (Choice::Notifications, 1) => t(
@@ -399,12 +437,16 @@ impl Choice {
         })
     }
 
-    fn options(self) -> Vec<&'static str> {
+    fn options(self, s: &Settings) -> Vec<&'static str> {
         match self {
             Choice::Mode => DockMode::ALL.map(|m| m.label()).to_vec(),
             Choice::Size => DockSize::ALL.map(|m| m.label()).to_vec(),
             Choice::Magnify => Magnify::ALL.map(|m| m.label()).to_vec(),
             Choice::Tiles => vec![t("Kapalı", "Off"), t("Açık", "On")],
+            Choice::NotchHide => vec![t("Hep görünür", "Always"), t("Üstüne gelince", "On hover")],
+            Choice::NotchEdge => NotchEdge::ALL.map(|e| e.label()).to_vec(),
+            Choice::NotchPlace if s.notch_edge.side() => vec![t("Üst", "Top"), t("Orta", "Middle"), t("Alt", "Bottom")],
+            Choice::NotchPlace => vec![t("Sol", "Left"), t("Orta", "Middle"), t("Sağ", "Right")],
             Choice::Autostart => vec![t("Kapalı", "Off"), t("Açık", "On")],
             Choice::Language => settings::Language::ALL.map(|l| l.label()).to_vec(),
             Choice::Updates => vec![t("Kapalı", "Off"), t("Denetle", "Check")],
@@ -419,6 +461,12 @@ impl Choice {
             Choice::Size => DockSize::ALL.iter().position(|m| *m == s.dock_size),
             Choice::Magnify => Magnify::ALL.iter().position(|m| *m == s.magnify),
             Choice::Tiles => Some(s.tiles as usize),
+            Choice::NotchHide => Some(s.notch_hide as usize),
+            Choice::NotchEdge => NotchEdge::ALL.iter().position(|e| *e == s.notch_edge),
+            Choice::NotchPlace => {
+                let pos = if s.notch_edge.side() { s.notch_y } else { s.notch_x };
+                Some(if pos < 0.25 { 0 } else if pos > 0.75 { 2 } else { 1 })
+            }
             Choice::Autostart => Some(autostart as usize),
             Choice::Language => settings::Language::ALL.iter().position(|l| *l == s.language),
             Choice::Updates => Some(s.check_updates as usize),
@@ -433,6 +481,10 @@ impl Choice {
             Choice::Size => s.dock_size = DockSize::ALL[i],
             Choice::Magnify => s.magnify = Magnify::ALL[i],
             Choice::Tiles => s.tiles = i == 1,
+            Choice::NotchHide => s.notch_hide = i == 1,
+            Choice::NotchEdge => s.notch_edge = NotchEdge::ALL[i],
+            Choice::NotchPlace if s.notch_edge.side() => s.notch_y = [0.0, 0.5, 1.0][i.min(2)],
+            Choice::NotchPlace => s.notch_x = [0.0, 0.5, 1.0][i.min(2)],
             Choice::Autostart => {}
             Choice::Language => s.language = settings::Language::ALL[i],
             Choice::Updates => s.check_updates = i == 1,
@@ -484,6 +536,8 @@ enum Control {
     ClockStart,
     ClockReset,
     CityResult(usize),
+    /// The open panel's top row beside the tabs: drag to move the notch.
+    Grip,
 }
 
 /// A message shown on the closed island for a moment.
@@ -639,7 +693,20 @@ pub struct Notch {
     icon_format: IDWriteTextFormat,
     tab_icon_format: IDWriteTextFormat,
     scale: f32,
+    /// The window's top-left corner on the screen.
     origin: (i32, i32),
+    /// The monitor the notch is on, and its part not kept by the dock
+    /// (screen pixels).
+    monitor: RECT,
+    work: RECT,
+    /// The edge the window is laid out for (Settings::notch_edge).
+    edge: NotchEdge,
+    /// Where along the top edge (Settings::notch_x), springing to a new place.
+    slide: Spring,
+    /// 1 = tucked away above the top edge (Settings › Notch › On hover).
+    tuck: Spring,
+    /// Moving the notch: the cursor's distance from the island's left edge.
+    grab: Option<f32>,
     // Motion.
     /// 0 = closed island, 1 = open panel.
     open: Spring,
@@ -780,6 +847,12 @@ impl Notch {
                 texts: Default::default(),
                 scale: 1.0,
                 origin: (0, 0),
+                monitor: RECT::default(),
+                work: RECT::default(),
+                edge: settings::get().notch_edge,
+                slide: Spring::new(edge_position(&settings::get())),
+                tuck: Spring::new(if settings::get().notch_hide { 1.0 } else { 0.0 }),
+                grab: None,
                 open: Spring::new(0.0),
                 rise: Spring::new(0.0),
                 spread: Spring::new(0.0),
@@ -897,9 +970,20 @@ impl Notch {
                 }
             }
             let m = info.rcMonitor;
-            let width = (WINDOW_WIDTH * self.scale).ceil() as i32;
-            let height = (WINDOW_HEIGHT * self.scale).ceil() as i32;
-            self.origin = (m.left + (m.right - m.left - width) / 2, m.top);
+            self.monitor = m;
+            self.work = info.rcWork;
+            self.edge = self.settings.notch_edge;
+            // On a side edge the window stands up, with room for the flares
+            // at both ends of the open panel.
+            let (along, depth) = if self.side() {
+                (WINDOW_HEIGHT + FLARE * 2.0 + 24.0, OPEN_WIDTH + 24.0)
+            } else {
+                (WINDOW_WIDTH, WINDOW_HEIGHT)
+            };
+            let along = (along * self.scale).ceil() as i32;
+            let depth = (depth * self.scale).ceil() as i32;
+            let (width, height) = if self.side() { (depth, along) } else { (along, depth) };
+            self.origin = (m.left, m.top);
             let _ = self.surface.resize(width, height);
             self.last_drawn = None;
             let _ = SetWindowPos(self.hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
@@ -1072,6 +1156,7 @@ impl Notch {
         let want = !self.headless
             && !self.hidden_for_fullscreen
             && self.open.target == 0.0
+            && self.tuck.target < 0.5
             && (self.playing() || self.bars.iter().any(|b| *b > 0.01));
         if want != self.level_running {
             self.level_running = want;
@@ -1114,6 +1199,10 @@ impl Notch {
     /// then the bars) and sends only that to the screen, instead of the whole
     /// window 30 times a second. False when anything else is changing too.
     fn render_bars(&mut self, force: bool) -> bool {
+        // On a side edge the bars sit elsewhere; a full frame is small there.
+        if self.side() {
+            return false;
+        }
         let steady = !self.animating
             && self.open.value < 0.001
             && self.music.value > 0.999
@@ -1125,6 +1214,7 @@ impl Notch {
         }
         let s = self.scale;
         let (island, top_radius, bottom_radius, flare) = self.island();
+        let docked = self.docked(island);
         let clip = self.bars_box(island);
         let cy = island.top + BAR * s / 2.0;
         let rt = self.surface.rt.clone();
@@ -1132,7 +1222,7 @@ impl Notch {
             rt.BeginDraw();
             rt.PushAxisAlignedClip(&clip, D2D1_ANTIALIAS_MODE_ALIASED);
             rt.Clear(Some(&rgba(0.0, 0.0, 0.0, 0.0)));
-            if let Some(path) = self.island_path(island, top_radius, bottom_radius, flare) {
+            if let Some(path) = self.island_path(island, top_radius, bottom_radius, flare, docked) {
                 let (r, g, b) = surface();
                 self.brush.SetColor(&rgba(r, g, b, self.settings.opacity));
                 rt.FillGeometry(&path, &self.brush, None);
@@ -1407,26 +1497,182 @@ impl Notch {
         self.render();
     }
 
-    /// The island right now.
+    /// Whether the notch stands on a side edge of the screen.
+    fn side(&self) -> bool {
+        self.edge.side()
+    }
+
+    /// The island right now, in the window.
     fn island(&self) -> (D2D_RECT_F, f32, f32, f32) {
+        let (r, top_radius, bottom_radius, flare) = self.edge_island();
+        (self.edge_to_window(r), top_radius, bottom_radius, flare)
+    }
+
+    /// The island in edge space: x runs along the screen edge the notch sits
+    /// on (as in the window), y away from it. On the top edge that is the
+    /// window itself; on a side edge, the window turned (`edge_to_window`).
+    fn edge_island(&self) -> (D2D_RECT_F, f32, f32, f32) {
         let s = self.scale;
-        let width = self.surface.width as f32;
         let o = self.open.value.clamp(0.0, 1.05);
-        let w = lerp(self.closed_width(), OPEN_WIDTH * s, o);
         // A banner with a second line makes the closed island taller.
-        let banner = self.banner_room.value.clamp(0.0, 1.0) * if self.banner.as_ref().is_some_and(|b| !b.body.is_empty()) { 16.0 } else { 6.0 };
-        let h = lerp((BAR + banner) * s, (BAR + self.panel_h.value) * s, o);
+        let extra = if self.banner.as_ref().is_some_and(|b| !b.body.is_empty()) { 16.0 } else { 6.0 };
+        let banner = self.banner_room.value.clamp(0.0, 1.0);
+        let (w, h) = if self.side() {
+            // A tall pill; the volume and a banner make it a short, wide card.
+            let osd = self.osd_room.value.clamp(0.0, 1.0);
+            let along = lerp(lerp(SIDE_LENGTH * s, BAR * s, osd), (BAR + extra) * s, banner);
+            let depth = lerp(lerp(SIDE_WIDTH * s, OSD_WIDTH * s, osd), BANNER_WIDTH * s, banner);
+            (lerp(along, (BAR + self.panel_h.value) * s, o), lerp(depth, OPEN_WIDTH * s, o))
+        } else {
+            (
+                lerp(self.closed_width(), OPEN_WIDTH * s, o),
+                lerp((BAR + banner * extra) * s, (BAR + self.panel_h.value) * s, o),
+            )
+        };
         let e = self.spread.value.clamp(0.0, 1.05);
         let c = CIRCLE * s;
         let w = lerp(c, w, e);
         let h = lerp(c, h, e);
-        let top = self.rise.value;
-        let r = rect(width / 2.0 - w / 2.0, top, width / 2.0 + w / 2.0, top + h);
+        // Tucked away, it waits beyond the edge (with the flares).
+        let top = self.rise.value - self.tuck.value.clamp(0.0, 1.0) * (h + (FLARE + 4.0) * s);
+        let (_, left) = self.placement(w);
+        let r = rect(left, top, left + w, top + h);
         let round = self.round_top.value.clamp(0.0, 1.0);
         let top_radius = round * c / 2.0;
         let bottom_radius = lerp(c / 2.0, RADIUS * s, e.min(1.0));
         let flare = if self.flares { FLARE * s } else { 0.0 };
         (r, top_radius, bottom_radius, flare)
+    }
+
+    /// Edge space to the window: on the left edge x and y swap; on the right
+    /// edge, mirrored too.
+    fn edge_to_window(&self, r: D2D_RECT_F) -> D2D_RECT_F {
+        let width = self.surface.width as f32;
+        match self.edge {
+            NotchEdge::Top => r,
+            NotchEdge::Left => rect(r.top, r.left, r.bottom, r.right),
+            NotchEdge::Right => rect(width - r.bottom, r.left, width - r.top, r.right),
+        }
+    }
+
+    /// The same as a transform, for the island's shape.
+    fn edge_matrix(&self) -> Matrix3x2 {
+        let width = self.surface.width as f32;
+        match self.edge {
+            NotchEdge::Top => IDENTITY,
+            NotchEdge::Left => Matrix3x2 { M11: 0.0, M12: 1.0, M21: 1.0, M22: 0.0, M31: 0.0, M32: 0.0 },
+            NotchEdge::Right => Matrix3x2 { M11: 0.0, M12: 1.0, M21: -1.0, M22: 0.0, M31: width, M32: 0.0 },
+        }
+    }
+
+    /// The stretch of screen the island slides along (screen pixels): the
+    /// whole top edge, or a side edge clear of the dock, with room for the
+    /// flares at both ends.
+    fn span(&self) -> (f32, f32) {
+        if self.side() {
+            let flare = FLARE * self.scale;
+            (self.work.top as f32 + flare, self.work.bottom as f32 - flare)
+        } else {
+            (self.monitor.left as f32, self.monitor.right as f32)
+        }
+    }
+
+    /// For an island `len` long along its edge: where the window starts
+    /// along the edge on the screen, and where the island starts in the
+    /// window. `slide` runs the island from one end (0) to the other (1), so
+    /// it grows away from the nearer end; the window stays on the monitor.
+    fn placement(&self, len: f32) -> (i32, f32) {
+        let (lo, hi) = self.span();
+        let start = lo + self.slide.value.clamp(0.0, 1.0) * (hi - lo - len).max(0.0);
+        let m = self.monitor;
+        let (size, min, max) = if self.side() { (self.surface.height, m.top, m.bottom) } else { (self.surface.width, m.left, m.right) };
+        let origin = ((start + len / 2.0 - size as f32 / 2.0).round() as i32).clamp(min, (max - size).max(min));
+        (origin, start - origin as f32)
+    }
+
+    /// The window's top-left corner when it starts at `along` along the edge.
+    fn window_origin(&self, along: i32) -> (i32, i32) {
+        let m = self.monitor;
+        match self.edge {
+            NotchEdge::Top => (along, m.top),
+            NotchEdge::Left => (m.left, along),
+            NotchEdge::Right => (m.right - self.surface.width, along),
+        }
+    }
+
+    /// How much the island (edge space) hugs the monitor's left and right
+    /// edges (0..1). On a side edge it keeps clear of the ends.
+    fn docked(&self, island: D2D_RECT_F) -> (f32, f32) {
+        if self.side() {
+            return (0.0, 0.0);
+        }
+        let reach = FLARE * self.scale;
+        let (origin, _) = self.placement(island.right - island.left);
+        let left = origin as f32 + island.left - self.monitor.left as f32;
+        let right = self.monitor.right as f32 - (origin as f32 + island.right);
+        (1.0 - (left / reach).clamp(0.0, 1.0), 1.0 - (right / reach).clamp(0.0, 1.0))
+    }
+
+    /// The cursor along the notch's edge (screen pixels).
+    fn cursor_along(&self) -> f32 {
+        let mut cursor = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut cursor);
+        }
+        if self.side() {
+            cursor.y as f32
+        } else {
+            cursor.x as f32
+        }
+    }
+
+    /// Follows the cursor while the notch is moved by its top row, snapping
+    /// to both ends and the middle.
+    fn drag_notch(&mut self) {
+        let Some(offset) = self.grab else { return };
+        let (island, ..) = self.edge_island();
+        let (lo, hi) = self.span();
+        let room = (hi - lo - (island.right - island.left)).max(1.0);
+        let x = self.cursor_along() - offset - lo;
+        let snap = SNAP * self.scale;
+        let x = if x < snap {
+            0.0
+        } else if x > room - snap {
+            room
+        } else if (x - room / 2.0).abs() < snap {
+            room / 2.0
+        } else {
+            x
+        };
+        let pos = (x / room).clamp(0.0, 1.0);
+        if pos != self.slide.target {
+            if self.side() {
+                self.settings.notch_y = pos;
+            } else {
+                self.settings.notch_x = pos;
+            }
+            self.slide.target = pos;
+            self.start_animation();
+        }
+    }
+
+    /// Moves the notch to another edge: it closes and comes in again there.
+    fn change_edge(&mut self) {
+        self.set_open(false);
+        self.open = Spring::new(0.0);
+        self.hovered = false;
+        self.mouse = None;
+        self.pressed = None;
+        self.place();
+        self.slide = Spring::new(edge_position(&self.settings));
+        self.rise = Spring { value: RISE * self.scale, velocity: 0.0, target: 0.0 };
+        self.round_top = Spring::new(1.0);
+        self.spread = Spring::new(0.0);
+        self.flares = false;
+        self.content = 0.0;
+        self.content_fade_from = None;
+        self.opening_since = Some(Instant::now());
+        self.start_animation();
     }
 
     /// Every control with its rectangle, for drawing and hit testing.
@@ -1440,6 +1686,10 @@ impl Notch {
             let x = tabs_left + i as f32 * tab_w;
             list.push((rect(x, island.top, x + tab_w, island.top + BAR * s), Control::Tab(i)));
         }
+        // Beside the tabs (the time and the date) the notch can be dragged.
+        let tabs_right = tabs_left + tab_w * TABS.len() as f32;
+        list.push((rect(island.left, island.top, tabs_left, island.top + BAR * s), Control::Grip));
+        list.push((rect(tabs_right, island.top, island.right, island.top + BAR * s), Control::Grip));
         if self.tab == MUSIC_TAB {
             self.music_controls(island, &mut list);
             return list;
@@ -1484,7 +1734,7 @@ impl Notch {
             let mut y = island.top + BAR * s + PAD * 0.7 * s;
             let x0 = left + LABEL_WIDTH * s;
             for choice in Choice::ALL {
-                let n = choice.options().len();
+                let n = choice.options(&self.settings).len();
                 let w = (right - x0) / n as f32;
                 for i in 0..n {
                     let x = x0 + i as f32 * w;
@@ -1749,6 +1999,20 @@ impl Notch {
             moving = true;
         }
 
+        // Settings › Notch › On hover: out of sight unless something shows.
+        let peek = !self.settings.notch_hide
+            || self.hovered
+            || self.grab.is_some()
+            || self.open.target > 0.0
+            || self.banner_room.target > 0.0
+            || self.osd_room.target > 0.0;
+        let tuck = if peek { 0.0 } else { 1.0 };
+        if tuck != self.tuck.target {
+            self.tuck.target = tuck;
+            self.update_level();
+        }
+        moving |= self.tuck.step(dt, 312.5, 35.0);
+        moving |= self.slide.step(dt, 400.0, 40.0);
         moving |= self.rise.step(dt, 500.0, 43.75);
         moving |= self.round_top.step(dt, 312.5, 35.0);
         moving |= self.spread.step(dt, 312.5, 35.0);
@@ -1820,11 +2084,16 @@ impl Notch {
 
     /// Nectar's SurfaceShape for the top edge: inward flares at the top, round
     /// bottom corners; a free circle (round top corners) during the opening.
-    fn island_path(&self, r: D2D_RECT_F, top_radius: f32, bottom_radius: f32, flare: f32) -> Option<ID2D1PathGeometry> {
+    /// `docked`: how much each side hugs a side edge of the screen. That side
+    /// loses its top flare, and its bottom corner turns into a flare down the
+    /// edge (square halfway).
+    fn island_path(&self, r: D2D_RECT_F, top_radius: f32, bottom_radius: f32, flare: f32, docked: (f32, f32)) -> Option<ID2D1PathGeometry> {
         let (w, h) = (r.right - r.left, r.bottom - r.top);
         let tr = top_radius.min(w / 2.0).min(h / 2.0).max(0.0);
         let br = bottom_radius.min(w / 2.0).min(h / 2.0).max(0.0);
-        let use_flare = flare > tr;
+        let side = |d: f32| (flare * (1.0 - d), br * (1.0 - 2.0 * d).max(0.0), flare * (2.0 * d - 1.0).max(0.0));
+        let (left_flare, left_round, left_drop) = side(docked.0);
+        let (right_flare, right_round, right_drop) = side(docked.1);
         unsafe {
             let path = self.factory.CreatePathGeometry().ok()?;
             let sink = path.Open().ok()?;
@@ -1839,26 +2108,36 @@ impl Notch {
                 },
                 arcSize: D2D1_ARC_SIZE_SMALL,
             };
-            if use_flare {
-                sink.BeginFigure(pt(r.left - flare, r.top), D2D1_FIGURE_BEGIN_FILLED);
-                sink.AddArc(&arc(r.left, r.top + flare, flare, true));
+            if left_flare > tr {
+                sink.BeginFigure(pt(r.left - left_flare, r.top), D2D1_FIGURE_BEGIN_FILLED);
+                sink.AddArc(&arc(r.left, r.top + left_flare, left_flare, true));
             } else {
                 sink.BeginFigure(pt(r.left + tr, r.top), D2D1_FIGURE_BEGIN_FILLED);
                 if tr >= 0.5 {
                     sink.AddArc(&arc(r.left, r.top + tr, tr, false));
                 }
             }
-            sink.AddLine(pt(r.left, r.bottom - br));
-            if br >= 0.5 {
-                sink.AddArc(&arc(r.left + br, r.bottom, br, false));
+            if left_drop >= 0.5 {
+                sink.AddLine(pt(r.left, r.bottom + left_drop));
+                sink.AddArc(&arc(r.left + left_drop, r.bottom, left_drop, true));
+            } else {
+                sink.AddLine(pt(r.left, r.bottom - left_round));
+                if left_round >= 0.5 {
+                    sink.AddArc(&arc(r.left + left_round, r.bottom, left_round, false));
+                }
             }
-            sink.AddLine(pt(r.right - br, r.bottom));
-            if br >= 0.5 {
-                sink.AddArc(&arc(r.right, r.bottom - br, br, false));
+            if right_drop >= 0.5 {
+                sink.AddLine(pt(r.right - right_drop, r.bottom));
+                sink.AddArc(&arc(r.right, r.bottom + right_drop, right_drop, true));
+            } else {
+                sink.AddLine(pt(r.right - right_round, r.bottom));
+                if right_round >= 0.5 {
+                    sink.AddArc(&arc(r.right, r.bottom - right_round, right_round, false));
+                }
             }
-            if use_flare {
-                sink.AddLine(pt(r.right, r.top + flare));
-                sink.AddArc(&arc(r.right + flare, r.top, flare, true));
+            if right_flare > tr {
+                sink.AddLine(pt(r.right, r.top + right_flare));
+                sink.AddArc(&arc(r.right + right_flare, r.top, right_flare, true));
             } else {
                 sink.AddLine(pt(r.right, r.top + tr));
                 if tr >= 0.5 {
@@ -1873,18 +2152,35 @@ impl Notch {
 
     fn render(&mut self) {
         let s = self.scale;
-        let (island, top_radius, bottom_radius, flare) = self.island();
+        let (edge, top_radius, bottom_radius, flare) = self.edge_island();
+        // The window follows the island along its edge.
+        let origin = self.window_origin(self.placement(edge.right - edge.left).0);
+        if origin != self.origin {
+            self.origin = origin;
+            self.last_drawn = None;
+        }
+        let island = self.edge_to_window(edge);
+        let docked = self.docked(edge);
+        // Tucked away, a strip the mouse can find (too faint to see) stays
+        // at the top edge.
+        let strip = self.settings.notch_hide && self.tuck.value > 0.5;
         let rt = self.surface.rt.clone();
         let o = self.open.value.clamp(0.0, 1.0);
         unsafe {
             rt.BeginDraw();
             let backdrop = self.headless && !crate::util::demo();
             rt.Clear(Some(&if backdrop { rgba(0.32, 0.40, 0.52, 1.0) } else { rgba(0.0, 0.0, 0.0, 0.0) }));
-            if let Some(path) = self.island_path(island, top_radius, bottom_radius, flare) {
+            if strip {
+                self.brush.SetColor(&rgba(0.0, 0.0, 0.0, 2.0 / 255.0));
+                rt.FillRectangle(&self.edge_to_window(rect(edge.left, 0.0, edge.right, 2.0)), &self.brush);
+            }
+            if let Some(path) = self.island_path(edge, top_radius, bottom_radius, flare, docked) {
                 let (r, g, b) = surface();
                 let base = self.settings.opacity;
                 self.brush.SetColor(&rgba(r, g, b, lerp(base, (base + 0.07).min(1.0), o)));
+                rt.SetTransform(&self.edge_matrix());
                 rt.FillGeometry(&path, &self.brush, None);
+                rt.SetTransform(&IDENTITY);
             }
 
             rt.PushAxisAlignedClip(&island, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -1902,7 +2198,9 @@ impl Notch {
                 let cy = island.top + BAR * s / 2.0;
                 self.draw_osd(island, cy, closed_all * ((volume - 0.35) / 0.65).clamp(0.0, 1.0));
             }
-            if closed > 0.0 {
+            if closed > 0.0 && self.side() {
+                self.draw_closed_side(island, closed);
+            } else if closed > 0.0 {
                 let (tw, th) = self.text_size(&self.time, &self.time_format);
                 let (date, counting) = self.closed_date();
                 let (dw, dh) = self.text_size(&date, &self.date_format);
@@ -1946,12 +2244,19 @@ impl Notch {
             let _ = rt.EndDraw(None, None);
         }
 
-        let drawn = RECT {
-            left: (island.left - flare - 2.0).floor() as i32,
-            top: (island.top - 2.0).floor().max(0.0) as i32,
-            right: (island.right + flare + 2.0).ceil() as i32,
-            bottom: (island.bottom + 2.0).ceil() as i32,
+        // The flares reach out at the top and, against a side edge, down it.
+        let reach = rect(edge.left - flare - 2.0, (edge.top - 2.0).max(0.0), edge.right + flare + 2.0, (edge.bottom + flare + 2.0).max(0.0));
+        let reach = if strip { rect(reach.left, 0.0, reach.right, reach.bottom.max(3.0)) } else { reach };
+        let reach = self.edge_to_window(reach);
+        let (sw, sh) = (self.surface.width, self.surface.height);
+        let mut drawn = RECT {
+            left: (reach.left.floor() as i32).clamp(0, sw),
+            top: (reach.top.floor() as i32).clamp(0, sh),
+            right: (reach.right.ceil() as i32).clamp(0, sw),
+            bottom: (reach.bottom.ceil() as i32).clamp(0, sh),
         };
+        drawn.right = drawn.right.max(drawn.left);
+        drawn.bottom = drawn.bottom.max(drawn.top);
         let size = (self.surface.width, self.surface.height);
         let dirty = match self.last_drawn {
             Some((last, last_size)) if last_size == size => Some(RECT {
@@ -1965,6 +2270,71 @@ impl Notch {
         self.last_drawn = Some((drawn, size));
         if !self.headless {
             let _ = self.surface.present(self.hwnd, self.origin.0, self.origin.1, dirty);
+        }
+    }
+
+    /// The closed island on a side edge, top to bottom: the album art (or the
+    /// weather), the time in two lines, the day and the month (or the
+    /// timer), the camera and microphone dots, the level bars (or the
+    /// temperature).
+    fn draw_closed_side(&self, island: D2D_RECT_F, alpha: f32) {
+        let s = self.scale;
+        let ink = |a: f32| ink_color(a * alpha);
+        let cx = (island.left + island.right) / 2.0;
+        let m = self.music.value.clamp(0.0, 1.0);
+        let mut y = island.top + 14.0 * s;
+        let a = 24.0 * s;
+        if m > 0.01 {
+            if let Some(track) = self.track() {
+                self.draw_art(track, rect(cx - a / 2.0, y, cx + a / 2.0, y + a), 6.0 * s, alpha * m);
+            }
+        }
+        let (glyph, temp) = match &self.weather {
+            Some(w) => (weather_icon(w), format!("{:.0}°", w.temperature)),
+            None => (ICON_CLOUD, "--°".to_string()),
+        };
+        if m < 0.99 {
+            self.weather_symbol(glyph, false, rect(cx - 9.0 * s, y + 3.0 * s, cx + 9.0 * s, y + 21.0 * s), ink(0.85 * (1.0 - m)));
+        }
+        y += a + 12.0 * s;
+        let (hours, minutes) = self.time.split_once(':').unwrap_or((self.time.as_str(), ""));
+        for part in [hours, minutes] {
+            let (tw, th) = self.text_size(part, &self.time_format);
+            self.text(part, &self.time_format, pt(cx - tw / 2.0, y), ink(0.95), tw + 4.0);
+            y += th - 3.0 * s;
+        }
+        y += 10.0 * s;
+        let (top_line, bottom_line, counting) = if self.clockwork.active() {
+            (ICON_STOPWATCH_TEXT.to_string(), self.clockwork.text(), true)
+        } else {
+            let mut parts = self.date.split_whitespace().skip(1);
+            (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string(), false)
+        };
+        let (dw, dh) = self.text_size(&top_line, &self.date_format);
+        let color = if counting { with_alpha(accent(), alpha) } else { ink(0.8) };
+        self.text(&top_line, &self.date_format, pt(cx - dw / 2.0, y), color, dw + 4.0);
+        y += dh - 2.0 * s;
+        let (mw, _) = self.text_size(&bottom_line, &self.small_format);
+        let color = if counting { with_alpha(accent(), alpha) } else { ink(0.55) };
+        self.text(&bottom_line, &self.small_format, pt(cx - mw / 2.0, y), color, mw + 4.0);
+        let cy = island.bottom - 22.0 * s;
+        if self.privacy_room.value > 0.01 {
+            let n = (!self.privacy.microphone.is_empty()) as usize + (!self.privacy.camera.is_empty()) as usize;
+            let width = (n as f32 * 7.0 + (n as f32 - 1.0).max(0.0) * 4.0) * s;
+            self.draw_privacy_dots(cx + width / 2.0, cy - 20.0 * s, alpha * self.privacy_room.value.clamp(0.0, 1.0));
+        }
+        if m > 0.01 {
+            let (bw, gap) = (3.0 * s, 2.5 * s);
+            let x0 = cx - (bw * 4.0 + gap * 3.0) / 2.0;
+            for (i, level) in self.bars.iter().enumerate() {
+                let bh = 3.0 * s + level.clamp(0.0, 1.0) * 13.0 * s;
+                let x = x0 + i as f32 * (bw + gap);
+                self.fill_rounded(rect(x, cy - bh / 2.0, x + bw, cy + bh / 2.0), bw / 2.0, with_alpha(accent(), alpha * m));
+            }
+        }
+        if m < 0.99 {
+            let (tw, th) = self.text_size(&temp, &self.date_format);
+            self.text(&temp, &self.date_format, pt(cx - tw / 2.0, cy - th / 2.0), ink(0.85 * (1.0 - m)), tw + 4.0);
         }
     }
 
@@ -2577,7 +2947,7 @@ impl Notch {
                     self.fill_rounded(inner, d / 2.0 - 5.0 * s, rgba(sr, sg, sb, alpha));
                 }
                 Control::Choice(choice, i) => {
-                    let n = choice.options().len();
+                    let n = choice.options(&self.settings).len();
                     let selected = choice.selected(&self.settings, self.autostart) == i;
                     let hot = hovered == Some(Control::Choice(choice, i));
                     let radius = (r.bottom - r.top) / 2.0;
@@ -2592,7 +2962,7 @@ impl Notch {
                     } else if hot {
                         self.fill_rounded(inner, radius - 2.0 * s, ink(0.08));
                     }
-                    let label = choice.options()[i];
+                    let label = choice.options(&self.settings)[i];
                     let (lw, lh) = self.text_size(label, &self.title_format);
                     let color = if selected { with_alpha(on_accent(), alpha) } else { ink(if hot { 0.95 } else { 0.7 }) };
                     self.text(label, &self.title_format, pt((r.left + r.right - lw) / 2.0, (r.top + r.bottom - lh) / 2.0), color, lw + 4.0);
@@ -2669,7 +3039,7 @@ impl Notch {
                     let (_, rh) = self.text_size(&place.region, &self.small_format);
                     self.text(&place.region, &self.small_format, pt(rx, cy - rh / 2.0), ink(0.5), r.right - 8.0 * s - rx);
                 }
-                Control::Update => {}
+                Control::Update | Control::Grip => {}
                 Control::ClockMode(i) => {
                     let selected = self.clockwork.mode == ClockMode::ALL[i];
                     let hot = hovered == Some(Control::ClockMode(i));
@@ -2924,6 +3294,10 @@ impl Notch {
             self.set_slider(&slider, v);
             return;
         }
+        if self.grab.is_some() {
+            self.drag_notch();
+            return;
+        }
         if !self.hidden_for_fullscreen && self.opening_since.is_none() {
             self.set_open(true);
         }
@@ -3060,6 +3434,15 @@ impl Notch {
 
     fn on_down(&mut self, x: f32, y: f32) {
         let hit = self.hit(x, y);
+        if hit == Some(Control::Grip) {
+            let (island, ..) = self.edge_island();
+            let along = if self.side() { self.origin.1 } else { self.origin.0 };
+            self.grab = Some(self.cursor_along() - (along as f32 + island.left));
+            unsafe {
+                SetCapture(self.hwnd);
+            }
+            return;
+        }
         if let Some(Control::Slider(slider)) = &hit {
             self.dragging = Some(slider.clone());
             unsafe {
@@ -3074,6 +3457,14 @@ impl Notch {
     }
 
     fn on_up(&mut self, x: f32, y: f32) {
+        if self.grab.take().is_some() {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            settings::set(self.settings, true);
+            self.render();
+            return;
+        }
         if let Some(slider) = self.dragging.take() {
             if slider == Slider::Opacity {
                 settings::write_file(&self.settings);
@@ -3162,6 +3553,7 @@ impl Notch {
                 }
             }
             Control::Quit => crate::dock::quit(),
+            Control::Grip => {}
             Control::ClockMode(i) => {
                 if self.clockwork.mode != ClockMode::ALL[i] {
                     self.clockwork.reset();
@@ -3405,6 +3797,46 @@ impl Notch {
         });
         n.render();
         save(&n, "banner-two-lines")?;
+        // Against the left edge, closed and open, and against the right one.
+        n.banner = None;
+        n.banner_room = Spring::new(0.0);
+        n.slide = Spring::new(0.0);
+        n.render();
+        save(&n, "closed-left")?;
+        n.tab = CONTROL_CENTER_TAB;
+        n.sync_panel_height(false);
+        n.open = Spring::new(1.0);
+        n.render();
+        save(&n, "open-left")?;
+        n.open = Spring::new(0.0);
+        n.slide = Spring::new(1.0);
+        n.render();
+        save(&n, "closed-right")?;
+        n.slide = Spring::new(0.5);
+        // On the left edge (with music) and the right edge (without):
+        // closed, open, and the volume.
+        for (edge, name, music) in [(NotchEdge::Left, "side-left", 1.0), (NotchEdge::Right, "side-right", 0.0)] {
+            n.settings.notch_edge = edge;
+            n.place();
+            n.slide = Spring::new(0.5);
+            n.music = Spring::new(music);
+            n.open = Spring::new(0.0);
+            n.render();
+            save(&n, name)?;
+            n.tab = if music > 0.5 { MUSIC_TAB } else { CONTROL_CENTER_TAB };
+            n.sync_panel_height(false);
+            n.open = Spring::new(1.0);
+            n.render();
+            save(&n, &format!("{name}-open"))?;
+            n.open = Spring::new(0.0);
+            n.osd_room = Spring::new(1.0);
+            n.render();
+            save(&n, &format!("{name}-volume"))?;
+            n.osd_room = Spring::new(0.0);
+        }
+        n.settings.notch_edge = NotchEdge::Top;
+        n.place();
+        n.music = Spring::new(1.0);
         Ok(())
     }
 
@@ -3702,6 +4134,15 @@ fn format_time(ms: i64) -> String {
     }
 }
 
+/// Where the notch sits along its edge (0..1).
+fn edge_position(s: &Settings) -> f32 {
+    if s.notch_edge.side() {
+        s.notch_y
+    } else {
+        s.notch_x
+    }
+}
+
 fn post(message: u32) {
     let hwnd = HWND(NOTCH_HWND.load(Ordering::Relaxed) as *mut _);
     if !hwnd.0.is_null() {
@@ -3768,8 +4209,23 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
-            (*ptr).dragging = None;
+            let notch = &mut *ptr;
+            notch.dragging = None;
+            if notch.grab.take().is_some() {
+                settings::set(notch.settings, true);
+            }
             LRESULT(0)
+        }
+        WM_SETCURSOR => {
+            // A sideways arrow where the notch can be dragged.
+            let notch = &*ptr;
+            if (lparam.0 & 0xFFFF) == 1 && (notch.grab.is_some() || notch.hovered_control() == Some(Control::Grip)) {
+                if let Ok(cursor) = LoadCursorW(None, if notch.side() { IDC_SIZENS } else { IDC_SIZEWE }) {
+                    SetCursor(Some(cursor));
+                }
+                return LRESULT(1);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_MOUSEWHEEL => {
             let delta = ((wparam.0 >> 16) & 0xFFFF) as u16 as i16;
@@ -3900,6 +4356,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let notch = &mut *ptr;
             notch.settings = settings::get();
             notch.autostart = crate::autostart::is_enabled();
+            if notch.settings.notch_edge != notch.edge {
+                notch.change_edge();
+            } else if notch.grab.is_none() {
+                notch.slide.target = edge_position(&notch.settings);
+            }
+            notch.start_animation();
             notch.render();
             LRESULT(0)
         }
