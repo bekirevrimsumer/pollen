@@ -1227,6 +1227,7 @@ impl Dock {
             slots.push(Slot { x, size });
             x += size;
         }
+        let icons_width = x;
         separators.push(x + gap);
         x += gap * 2.0;
         let tray_x = x;
@@ -1239,21 +1240,29 @@ impl Dock {
         let content_width = x;
 
         let left = (width - content_width) / 2.0;
+        let w = self.widen.value.clamp(0.0, 1.0);
+        // Full width: the tray, the clock and the desktop button go to the
+        // corner, so the icons alone are centered on the screen, as on the
+        // taskbar (kept clear of the tray if there are a great many).
+        let corner_left = width - DESKTOP_WIDTH * s - 6.0 * s - self.clock_width - tile * 0.75;
+        let centered = ((width - icons_width) / 2.0).min(corner_left - gap * 2.0 - icons_width).max(left);
+        let icons_left = lerp(left, centered, w);
         let drag = self.drag.as_ref().filter(|d| d.active);
         for (slot, item) in slots.iter_mut().zip(&self.items) {
-            slot.x += left + item.shift.value * s;
+            slot.x += icons_left + item.shift.value * s;
             if let Some(d) = drag.filter(|d| d.key == item.key) {
                 slot.x = d.x - d.grab * slot.size;
             }
         }
-        for sep in &mut separators {
-            *sep += left;
+        // The last separator (before the tray) moves with the tray below.
+        let last = separators.len() - 1;
+        for (i, sep) in separators.iter_mut().enumerate() {
+            *sep += if i == last { left } else { icons_left };
         }
 
         // The spread-out bar, then Fixed mode's full-width version of it.
         let bar_top = height - BAR_HEIGHT * s;
         let around = rect(left - PAD_X * s, bar_top, left + content_width + PAD_X * s, height);
-        let w = self.widen.value.clamp(0.0, 1.0);
         let full = lerp_rect(around, rect(0.0, bar_top, width, height), w);
 
         // Hide/show motion: the circle, flattening, spreading out, dropping.

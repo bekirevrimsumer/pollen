@@ -104,7 +104,8 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Three modes (right-click the dock, or the notch's Settings tab):
   - **Sabit (Fixed):** always visible, reserves its strip. While a window is
     maximized or snapped down to it, the bar widens to the full screen width, so the
-    strip never shows bare wallpaper beside the bar
+    strip never shows bare wallpaper beside the bar; the tray and the clock go to
+    the corner and the icons stay in the middle of the screen, as on the taskbar
   - **Akıllı (Smart):** reserves nothing, hides while a window covers it
   - **Göz at (Peek):** hidden until the mouse reaches the bottom edge
 - The Windows taskbar pins, in the same order, including Store apps pinned from Start
