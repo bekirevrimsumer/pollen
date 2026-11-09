@@ -122,7 +122,13 @@ Command line: `Pollen.exe --install` installs or updates without asking,
   above it, so tray apps (Steam, Discord, ...) and their menus work as usual
 - Start button, a clock (click: notifications and calendar) and the taskbar's
   show-desktop button at the right end (in the screen's corner when full width)
-- Click to open, click a running app to focus it, again to minimize, or to cycle its windows
+- Click to open, click a running app to focus it, again to minimize, or to cycle its windows;
+  Shift+click or a middle click opens another window of it, as on the taskbar
+- Hold a dragged file over a running app's icon and its window comes up, so the
+  file can be dropped into it
+- Store apps show the icon and name from their package (WhatsApp's program file
+  has no icon), and untitled windows that ask for a taskbar button get one too
+  (a console started with `start ""`, such as GoodbyeDPI's)
 - Badges: a red count of an app's direct messages and mentions waiting in the
   Action Center, and an orange dot when it flashes for attention or has other new
   notifications (a chat app's channel messages: Slack and Discord are told apart);
@@ -135,7 +141,8 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Right-click menu: the app's jump list as on the taskbar (its tasks such as "New
   InPrivate window", its own categories, and recently opened files when Windows'
   "Show recently opened items" setting is on), then new window, close the window
-  (or all of them), pin to / remove from the dock, and a Pollen submenu with the
+  (or all of them), end task (ends the app's process, for one that no longer
+  answers; never Explorer), pin to / remove from the dock, and a Pollen submenu with the
   mode and quitting. Pins made in Pollen are kept in `%APPDATA%\Pollen\pins.txt`; removing one of
   Windows' own taskbar pins only hides it from the dock (`hidden-pins.txt`), since
   Windows does not let other apps change its pins

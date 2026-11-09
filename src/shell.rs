@@ -1,7 +1,11 @@
 //! Starting, focusing and closing apps.
 
-use windows::core::{w, Interface, Result, BSTR, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::core::{w, Interface, Result, BOOL, BSTR, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::{
+    OpenProcess, QueryFullProcessImageNameW, TerminateProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE,
+};
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoUninitialize, IDispatch, IServiceProvider, CLSCTX_LOCAL_SERVER,
     COINIT_APARTMENTTHREADED,
@@ -15,8 +19,9 @@ use windows::Win32::UI::Shell::{
     ShellExecuteW, ShellWindows, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AllowSetForegroundWindow, GetShellWindow, GetWindowThreadProcessId, IsIconic, PostMessageW, SetForegroundWindow,
-    ShowWindow, SW_RESTORE, SW_SHOWNORMAL, WM_CLOSE,
+    AllowSetForegroundWindow, EnumChildWindows, GetClassNameW, GetShellWindow, GetWindowThreadProcessId, IsIconic,
+    PostMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, HWND_TOP, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    SW_RESTORE, SW_SHOWNOACTIVATE, SW_SHOWNORMAL, WM_CLOSE,
 };
 
 use crate::util::{pcwstr, wide};
@@ -99,6 +104,21 @@ pub fn focus(hwnd: HWND) {
     }
 }
 
+/// Brings a window up for a drag held over its dock icon, so the file can be
+/// dropped into it. No synthetic Alt press as in `focus`: it would change the
+/// drag's effect. If Windows refuses the focus, the window still comes to the
+/// top of the z-order.
+pub fn bring_up(hwnd: HWND) {
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        }
+        if !SetForegroundWindow(hwnd).as_bool() {
+            let _ = SetWindowPos(hwnd, Some(HWND_TOP), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+    }
+}
+
 fn tap_alt() {
     press_keys(&[VK_MENU]);
 }
@@ -136,5 +156,64 @@ pub fn close(windows: &[HWND]) {
         unsafe {
             let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
         }
+    }
+}
+
+/// Ends the processes behind the windows outright, as the taskbar's "End
+/// task" does, for an app that no longer answers closing. Explorer and the
+/// frame host of Store apps are left alone: ending them would take the
+/// desktop, or every Store app's window, with them.
+pub fn end_task(windows: &[HWND]) {
+    let me = std::process::id();
+    let mut pids: Vec<u32> = Vec::new();
+    for &hwnd in windows {
+        let pid = owning_process(hwnd);
+        if pid != 0 && pid != me && !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    for pid in pids {
+        unsafe {
+            let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE, false, pid) else { continue };
+            let mut buf = [0u16; 1024];
+            let mut len = buf.len() as u32;
+            let name = if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len).is_ok() {
+                String::from_utf16_lossy(&buf[..len as usize]).to_lowercase()
+            } else {
+                String::new()
+            };
+            let shell = name.is_empty() || name.ends_with("\\explorer.exe") || name.ends_with("\\applicationframehost.exe");
+            if !shell {
+                let _ = TerminateProcess(handle, 1);
+            }
+            let _ = CloseHandle(handle);
+        }
+    }
+}
+
+/// The process behind a window; for a Store app's frame (ApplicationFrameHost),
+/// the app's own process, whose window sits inside the frame.
+fn owning_process(hwnd: HWND) -> u32 {
+    unsafe extern "system" fn other(child: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut (u32, u32));
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(child, Some(&mut pid));
+        if pid != 0 && pid != search.0 {
+            search.1 = pid;
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    unsafe {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        let mut class = [0u16; 64];
+        let len = GetClassNameW(hwnd, &mut class).max(0) as usize;
+        if String::from_utf16_lossy(&class[..len]) == "ApplicationFrameWindow" {
+            let mut search = (pid, 0u32);
+            let _ = EnumChildWindows(Some(hwnd), Some(other), LPARAM(&mut search as *mut _ as isize));
+            return search.1;
+        }
+        pid
     }
 }

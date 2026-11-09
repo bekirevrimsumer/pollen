@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use windows::core::{Interface, BOOL, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, PROPERTYKEY, RECT};
+use windows::Win32::Foundation::{CloseHandle, ERROR_SUCCESS, HWND, LPARAM, PROPERTYKEY, RECT};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS};
+use windows::Win32::Storage::Packaging::Appx::GetApplicationUserModelId;
 use windows::Win32::Storage::FileSystem::{
     GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW, WIN32_FIND_DATAW,
 };
@@ -50,6 +51,9 @@ pub struct AppWindow {
     /// Lowercased full path of the owning process, empty if it could not be read.
     pub exe: String,
     pub aumid: Option<String>,
+    /// The app's AppUserModelID from its package, for a packaged (Store) app's
+    /// process: its icon and name live in the package, not always in the exe.
+    pub package: Option<String>,
 }
 
 fn taskbar_dir() -> Option<PathBuf> {
@@ -337,7 +341,10 @@ fn is_app_window(hwnd: HWND) -> bool {
         if DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4).is_ok() && cloaked != 0 {
             return false;
         }
-        if GetWindowTextLengthW(hwnd) == 0 {
+        // Untitled windows are mostly helpers, but one that asks for a taskbar
+        // button gets it, as on the taskbar: a console started with `start ""`
+        // (GoodbyeDPI's scripts, for one) has no title.
+        if GetWindowTextLengthW(hwnd) == 0 && ex & WS_EX_APPWINDOW.0 == 0 {
             return false;
         }
     }
@@ -356,6 +363,22 @@ fn process_path(pid: u32) -> String {
         } else {
             String::new()
         }
+    }
+}
+
+/// A packaged app's AppUserModelID (`Package_family!App`) from its process.
+fn package_aumid(pid: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 512];
+        let mut len = buf.len() as u32;
+        let result = GetApplicationUserModelId(handle, &mut len, Some(PWSTR(buf.as_mut_ptr())));
+        let _ = CloseHandle(handle);
+        if result != ERROR_SUCCESS {
+            return None;
+        }
+        let id = from_wide_buf(&buf);
+        (!id.is_empty()).then_some(id)
     }
 }
 
@@ -406,6 +429,27 @@ pub fn app_window_frames() -> Vec<RECT> {
         let _ = EnumWindows(Some(collect), LPARAM(&mut frames as *mut _ as isize));
     }
     frames
+}
+
+/// The highest of these windows in the z-order (the one used last).
+pub fn topmost_of(windows: &[HWND]) -> Option<HWND> {
+    struct Search<'a> {
+        windows: &'a [HWND],
+        found: Option<HWND>,
+    }
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let search = &mut *(lparam.0 as *mut Search);
+        if search.windows.contains(&hwnd) {
+            search.found = Some(hwnd);
+            return BOOL(0);
+        }
+        BOOL(1)
+    }
+    let mut search = Search { windows, found: None };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut _ as isize));
+    }
+    search.found.or_else(|| windows.first().copied())
 }
 
 /// The highest app window in the z-order that is on the given monitor, whether
@@ -469,7 +513,9 @@ pub fn app_windows() -> Vec<AppWindow> {
             if pid == me {
                 return None;
             }
-            Some(AppWindow { hwnd, exe: process_path(pid), aumid: window_aumid(hwnd) })
+            let exe = process_path(pid);
+            let package = if exe.contains("\\windowsapps\\") { package_aumid(pid) } else { None };
+            Some(AppWindow { hwnd, exe, aumid: window_aumid(hwnd), package })
         })
         .collect()
 }
@@ -559,7 +605,7 @@ pub fn print_diagnostics() {
     }
     for hwnd in hwnds {
         let title = window_title(hwnd);
-        if title.is_empty() {
+        if title.is_empty() && !is_app_window(hwnd) {
             continue;
         }
         let mut pid = 0u32;
@@ -569,7 +615,7 @@ pub fn print_diagnostics() {
         let mut cloaked = 0u32;
         let _ = unsafe { DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &mut cloaked as *mut u32 as *mut _, 4) };
         println!(
-            "  [{}] {:?} class={} ex={:#x} owner={} cloaked={} exe={} aumid={:?}",
+            "  [{}] {:?} class={} ex={:#x} owner={} cloaked={} exe={} aumid={:?} package={:?}",
             if is_app_window(hwnd) { "APP" } else { "   " },
             title.chars().take(40).collect::<String>(),
             class_name(hwnd),
@@ -578,6 +624,7 @@ pub fn print_diagnostics() {
             cloaked,
             process_path(pid),
             window_aumid(hwnd),
+            package_aumid(pid),
         );
     }
 }

@@ -53,7 +53,13 @@ use windows::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HDC, HMONITOR, MONITORINFO, MONITORINFOEXW,
     MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
 };
+use windows::Win32::Foundation::POINTL;
+use windows::Win32::System::Com::IDataObject;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Ole::{
+    IDropTarget, IDropTarget_Impl, OleInitialize, RegisterDragDrop, RevokeDragDrop, DROPEFFECT, DROPEFFECT_NONE,
+};
+use windows::Win32::System::SystemServices::{MK_SHIFT, MODIFIERKEYS_FLAGS};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, HWINEVENTHOOK};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -72,7 +78,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SW_HIDE, SW_MINIMIZE, SW_SHOWNOACTIVATE, TPM_BOTTOMALIGN, TPM_CENTERALIGN, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_CAPTURECHANGED, WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_NULL,
+    WM_CAPTURECHANGED, WM_DPICHANGED, WM_ENDSESSION, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_NULL,
     WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
     WS_EX_TOPMOST, WS_POPUP,
 };
@@ -142,14 +149,19 @@ const TIMER_CLOCK: usize = 4;
 const TIMER_WINDOWS_MOVED: usize = 5;
 const TIMER_HIDE: usize = 6;
 const TIMER_PREVIEW: usize = 7;
+const TIMER_DROP_HOVER: usize = 8;
 /// Nectar's default delay before the window previews open.
 const PREVIEW_DELAY_MS: u32 = 300;
+/// How long a dragged file has to stay over a running app's icon before its
+/// window comes up to take the drop (about the taskbar's delay).
+const DROP_HOVER_MS: u32 = 600;
 
 const CMD_OPEN: usize = 1;
 const CMD_CLOSE: usize = 2;
 const CMD_QUIT: usize = 3;
 const CMD_PIN: usize = 4;
 const CMD_UNPIN: usize = 5;
+const CMD_END_TASK: usize = 6;
 /// Jump list entries: this plus their index.
 const CMD_JUMP: usize = 1000;
 const CMD_MODE_FIXED: usize = 10;
@@ -464,10 +476,9 @@ impl Item {
 
     fn owns(&self, window: &AppWindow) -> bool {
         let exe_match = self.exe.as_deref().is_some_and(|e| !window.exe.is_empty() && e == window.exe);
-        let aumid_match = match (&self.aumid, &window.aumid) {
-            (Some(a), Some(b)) => a.eq_ignore_ascii_case(b),
-            _ => false,
-        };
+        let aumid_match = self.aumid.as_deref().is_some_and(|a| {
+            [&window.aumid, &window.package].into_iter().flatten().any(|b| a.eq_ignore_ascii_case(b))
+        });
         exe_match || aumid_match
     }
 
@@ -591,6 +602,11 @@ pub struct Dock {
     /// The hovered app whose window previews are due or up.
     preview_for: Option<String>,
     hidden_for_fullscreen: bool,
+    /// The running app a dragged file is held over, whose window comes up
+    /// after DROP_HOVER_MS.
+    drop_hover: Option<String>,
+    /// A file is being dragged over the dock.
+    dropping: bool,
     clock: String,
     clock_width: f32,
     shell_message: u32,
@@ -702,6 +718,8 @@ impl Dock {
                 menu_open: false,
                 preview_for: None,
                 hidden_for_fullscreen: false,
+                drop_hover: None,
+                dropping: false,
                 clock: String::new(),
                 clock_width: 0.0,
                 shell_message: RegisterWindowMessageW(w!("SHELLHOOK")),
@@ -731,6 +749,11 @@ impl Dock {
             if headless {
                 return Ok(dock);
             }
+            // Files dragged over the icons (see DropTarget). The thread is
+            // already an STA; OLE needs its own initialization on top.
+            let _ = OleInitialize(None);
+            let target: IDropTarget = DropTarget { hwnd: hwnd.0 as isize }.into();
+            let _ = RegisterDragDrop(hwnd, &target);
 
             if dock.wants_to_show() {
                 dock.start_opening();
@@ -1256,11 +1279,14 @@ impl Dock {
             (apps::window_title(window.hwnd), format!("shell:AppsFolder\\{aumid}"))
         } else {
             let exe = window.exe.clone();
+            // A packaged app's icon and name are in its package (WhatsApp's
+            // exe has no icon), and its exe cannot be started directly.
+            let packaged = window.package.as_ref().map(|id| format!("shell:AppsFolder\\{id}"));
             let name = self
                 .names
                 .entry(exe.clone())
                 .or_insert_with(|| {
-                    apps::exe_description(&exe).unwrap_or_else(|| {
+                    packaged.as_deref().and_then(apps::shell_display_name).or_else(|| apps::exe_description(&exe)).unwrap_or_else(|| {
                         std::path::Path::new(&exe)
                             .file_stem()
                             .map(|s| s.to_string_lossy().to_string())
@@ -1268,12 +1294,12 @@ impl Dock {
                     })
                 })
                 .clone();
-            (name, exe)
+            (name, packaged.unwrap_or(exe))
         };
         let mut item = Item::new(Kind::App, key, name, source.clone(), false, self.ready);
         item.launch = (!source.is_empty()).then_some(source);
         item.exe = (!store_app && !window.exe.is_empty()).then(|| window.exe.clone());
-        item.aumid = if store_app { window.aumid.clone() } else { None };
+        item.aumid = if store_app { window.aumid.clone() } else { window.package.clone() };
         item.windows = vec![window.hwnd];
         item
     }
@@ -1484,8 +1510,9 @@ impl Dock {
         if self.headless {
             return;
         }
+        // No previews under a dragged file: its window comes up instead.
         let target = hovered
-            .filter(|&i| self.items[i].kind == Kind::App && !self.items[i].windows.is_empty())
+            .filter(|&i| !self.dropping && self.items[i].kind == Kind::App && !self.items[i].windows.is_empty())
             .map(|i| self.items[i].key.clone());
         if target == self.preview_for {
             return;
@@ -2213,6 +2240,59 @@ impl Dock {
         self.update_targets();
     }
 
+    // ---- files dragged over the dock ------------------------------------------
+
+    /// A file dragged over the dock, at a screen point: the dock shows and
+    /// magnifies as for the mouse, and a running app's window comes up once
+    /// the file has stayed over its icon a moment, so it can be dropped in.
+    fn on_drop_hover(&mut self, screen_x: i32, screen_y: i32) {
+        let (x, y) = ((screen_x - self.origin.0) as f32, (screen_y - self.origin.1) as f32);
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_HIDE);
+        }
+        self.dropping = true;
+        self.lingering = false;
+        self.mouse = Some((x, y));
+        self.update_visibility();
+        self.update_targets();
+        let over = match self.hit_test(x, y) {
+            Some(Hit::Item(i)) if self.items[i].kind == Kind::App && !self.items[i].windows.is_empty() => {
+                Some(self.items[i].key.clone())
+            }
+            _ => None,
+        };
+        if over != self.drop_hover {
+            self.drop_hover = over;
+            unsafe {
+                let _ = KillTimer(Some(self.hwnd), TIMER_DROP_HOVER);
+                if self.drop_hover.is_some() {
+                    SetTimer(Some(self.hwnd), TIMER_DROP_HOVER, DROP_HOVER_MS, None);
+                }
+            }
+        }
+    }
+
+    /// The dragged file left the dock, or was dropped (the dock takes no drops).
+    fn on_drop_leave(&mut self) {
+        self.dropping = false;
+        self.drop_hover = None;
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_DROP_HOVER);
+        }
+        self.on_mouse_leave();
+    }
+
+    fn on_drop_hover_timer(&mut self) {
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_DROP_HOVER);
+        }
+        let Some(key) = self.drop_hover.clone() else { return };
+        let Some(item) = self.items.iter().find(|it| it.key == key) else { return };
+        if let Some(window) = apps::topmost_of(&item.windows) {
+            shell::bring_up(window);
+        }
+    }
+
     fn launch(&mut self, index: usize) {
         if let Some(target) = self.items[index].launch.clone() {
             shell::launch(&target);
@@ -2777,6 +2857,8 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
     if running {
         let close = if windows == 1 { t("Pencereyi kapat", "Close window") } else { t("Tüm pencereleri kapat", "Close all windows") };
         let _ = AppendMenuW(menu, MF_STRING, CMD_CLOSE, &HSTRING::from(close));
+        // For an app that no longer answers: ends its process outright.
+        let _ = AppendMenuW(menu, MF_STRING, CMD_END_TASK, &HSTRING::from(t("Görevi sonlandır", "End task")));
     }
     if can_open && pinned {
         let _ = AppendMenuW(menu, MF_STRING, CMD_UNPIN, &HSTRING::from(t("Dock'tan kaldır", "Remove from dock")));
@@ -2849,6 +2931,11 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
             shell::close(&windows);
             dock.schedule_refresh();
         }
+        (CMD_END_TASK, Some(i)) if i < dock.items.len() => {
+            let windows = dock.items[i].windows.clone();
+            shell::end_task(&windows);
+            dock.schedule_refresh();
+        }
         (CMD_PIN, Some(i)) if i < dock.items.len() => dock.pin(i),
         (CMD_UNPIN, Some(i)) if i < dock.items.len() => dock.unpin(i),
         (CMD_MODE_FIXED, _) => dock.set_mode(DockMode::Fixed),
@@ -2856,6 +2943,67 @@ unsafe fn show_menu(dock: *mut Dock, hit: Option<Hit>) {
         (CMD_MODE_PEEK, _) => dock.set_mode(DockMode::Peek),
         (CMD_QUIT, _) => quit(),
         _ => {}
+    }
+}
+
+/// Files dragged over a dock. While a drag runs, the mouse belongs to the
+/// drag and the dock gets no mouse messages; OLE tells it through this
+/// instead. It never takes the drop: it only brings up the window to drop in.
+#[windows::core::implement(IDropTarget)]
+struct DropTarget {
+    hwnd: isize,
+}
+
+impl DropTarget_Impl {
+    /// The dock behind the window, if it is still there. OLE calls in on the
+    /// dock's own thread, from its message loop, as window messages do.
+    fn dock(&self) -> Option<&mut Dock> {
+        unsafe {
+            let ptr = GetWindowLongPtrW(HWND(self.hwnd as *mut _), GWLP_USERDATA) as *mut Dock;
+            ptr.as_mut()
+        }
+    }
+}
+
+impl IDropTarget_Impl for DropTarget_Impl {
+    fn DragEnter(
+        &self,
+        _data: windows::core::Ref<'_, IDataObject>,
+        _keys: MODIFIERKEYS_FLAGS,
+        pt: &POINTL,
+        effect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        self.DragOver(_keys, pt, effect)
+    }
+
+    fn DragOver(&self, _keys: MODIFIERKEYS_FLAGS, pt: &POINTL, effect: *mut DROPEFFECT) -> Result<()> {
+        if let Some(dock) = self.dock() {
+            dock.on_drop_hover(pt.x, pt.y);
+        }
+        if let Some(effect) = unsafe { effect.as_mut() } {
+            *effect = DROPEFFECT_NONE;
+        }
+        Ok(())
+    }
+
+    fn DragLeave(&self) -> Result<()> {
+        if let Some(dock) = self.dock() {
+            dock.on_drop_leave();
+        }
+        Ok(())
+    }
+
+    fn Drop(
+        &self,
+        _data: windows::core::Ref<'_, IDataObject>,
+        _keys: MODIFIERKEYS_FLAGS,
+        _pt: &POINTL,
+        effect: *mut DROPEFFECT,
+    ) -> Result<()> {
+        if let Some(effect) = unsafe { effect.as_mut() } {
+            *effect = DROPEFFECT_NONE;
+        }
+        self.DragLeave()
     }
 }
 
@@ -2980,7 +3128,15 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let hit = dock.hit_test(x, y);
             let pressed = dock.pressed.take();
             if let Some(hit) = hit.filter(|h| Some(*h) == pressed) {
-                dock.activate(hit);
+                // Shift+click opens another window of the app, as on the taskbar.
+                let shift = wparam.0 & MK_SHIFT.0 as usize != 0;
+                match hit {
+                    Hit::Item(i) if shift && dock.items[i].kind == Kind::App => {
+                        crate::preview::hide_now();
+                        dock.launch(i);
+                    }
+                    _ => dock.activate(hit),
+                }
             }
             (*ptr).start_animation();
             LRESULT(0)
@@ -2989,6 +3145,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let (x, y) = mouse_point(lparam);
             let hit = (*ptr).hit_test(x, y);
             show_menu(ptr, hit);
+            LRESULT(0)
+        }
+        WM_MBUTTONUP => {
+            // A middle click opens another window of the app, as on the taskbar.
+            let (x, y) = mouse_point(lparam);
+            let dock = &mut *ptr;
+            if let Some(Hit::Item(i)) = dock.hit_test(x, y) {
+                if dock.items[i].kind == Kind::App {
+                    crate::preview::hide_now();
+                    dock.launch(i);
+                }
+            }
             LRESULT(0)
         }
         WM_TIMER => {
@@ -3008,6 +3176,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     dock.update_fullscreen();
                     dock.update_window_state();
                 }
+                TIMER_DROP_HOVER => dock.on_drop_hover_timer(),
                 TIMER_PREVIEW => {
                     let _ = KillTimer(Some(hwnd), TIMER_PREVIEW);
                     if let Some(key) = dock.preview_for.clone() {
@@ -3171,6 +3340,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             (*ptr).shutdown();
+            let _ = RevokeDragDrop(hwnd);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             if (*ptr).is_main() {
                 // Quitting: the other monitors' docks go too.
