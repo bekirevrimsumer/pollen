@@ -1,6 +1,6 @@
 [package]
 name = "pollen"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2021"
 license = "GPL-3.0-only"
 description = "A lightweight native dock for Windows"
@@ -24,6 +24,7 @@ windows = { version = "0.61", features = [
   "Win32_Networking_WinHttp",
   "Win32_NetworkManagement_IpHelper",
   "Win32_NetworkManagement_Ndis",
+  "Win32_NetworkManagement_NetManagement",
   "Foundation",
   "Foundation_Collections",
   "ApplicationModel",

@@ -25,7 +25,7 @@
 //! once per display refresh (see `pacer`) until everything settles.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::f32::consts::PI;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -68,7 +68,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, IsIconic, IsZoomed, KillTimer, GWL_STYLE, WS_CAPTION, WS_THICKFRAME,
     LoadCursorW, PostMessageW, PostQuitMessage, RegisterClassExW, RegisterShellHookWindow, RegisterWindowMessageW,
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow, TrackPopupMenu,
-    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, GWLP_USERDATA,
+    EVENT_OBJECT_LOCATIONCHANGE, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, GA_ROOT, GA_ROOTOWNER, GWLP_USERDATA,
     HWND_TOPMOST, IDC_ARROW, MA_NOACTIVATE, MF_CHECKED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOSIZE, SW_HIDE, SW_MINIMIZE, SW_SHOWNOACTIVATE, TPM_BOTTOMALIGN, TPM_CENTERALIGN, TPM_RETURNCMD,
     TPM_RIGHTBUTTON, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
@@ -80,6 +80,7 @@ use windows_numerics::Vector2;
 
 use crate::anim::Spring;
 use crate::apps::{self, AppWindow};
+use crate::controls::notifications;
 use crate::icons;
 use crate::pacer;
 use crate::render::Surface;
@@ -124,6 +125,12 @@ const CLOCK_PAD: f32 = 6.0;
 const DESKTOP_WIDTH: f32 = 32.0;
 const ICON_DESKTOP: char = '\u{E7F4}';
 const HIDE_DELAY_MS: u32 = 800;
+/// How high an icon hops when its app gets a notification.
+const HOP: f32 = 10.0;
+/// The badge's red (macOS's and Windows' own badge color).
+const BADGE_RED: D2D1_COLOR_F = rgba(0.93, 0.23, 0.21, 1.0);
+/// The attention dot's orange (the taskbar's flashing button).
+const ATTENTION_ORANGE: D2D1_COLOR_F = rgba(0.98, 0.58, 0.16, 1.0);
 
 /// Nectar's "Midnight" theme: hsl(#5e8bff's hue, 40%, 10%) = #0f1524.
 /// Nectar's default (and "solid" style) background opacity.
@@ -169,6 +176,9 @@ const WM_SYNC_PINS: u32 = WM_APP + 16;
 const WM_TRAYICON: u32 = WM_APP + 17;
 /// The update check found a newer Pollen.
 const WM_UPDATE: u32 = WM_APP + 18;
+/// The Action Center's notifications changed, or a window asked for attention:
+/// the icons' badges need another look.
+const WM_BADGES: u32 = WM_APP + 19;
 const ABN_POSCHANGED: usize = 1;
 const ABN_FULLSCREENAPP: usize = 2;
 
@@ -181,6 +191,8 @@ const HSHELL_GETMINRECT: usize = 5;
 const HSHELL_REDRAW: usize = 6;
 const HSHELL_WINDOWREPLACED: usize = 13;
 const HSHELL_RUDEAPPACTIVATED: usize = 0x8004;
+/// A window flashes (FlashWindowEx): it wants attention.
+const HSHELL_FLASH: usize = 0x8006;
 
 /// The main (primary monitor's) dock window, for the WinEvent callback (which
 /// gets no context pointer) and for the notch and the previews.
@@ -190,6 +202,8 @@ thread_local! {
     /// The other monitors' docks. The main dock creates and removes them as
     /// monitors come and go.
     static OTHERS: RefCell<Vec<Box<Dock>>> = const { RefCell::new(Vec::new()) };
+    /// Windows that flashed for attention and have not been activated since.
+    static ATTENTION: RefCell<HashSet<isize>> = RefCell::new(HashSet::new());
 }
 
 /// A monitor: its GDI device name (`\\.\DISPLAY2`), handle and whether it is the primary.
@@ -393,6 +407,15 @@ struct Item {
     shift: Spring,
     /// Closing; removed once it has shrunk away and its slot has closed.
     leaving: bool,
+    /// Its direct messages and mentions in the Action Center that came while
+    /// it was not in front.
+    badge: usize,
+    /// One of its windows flashed, or it has other new notifications (a chat
+    /// app's channel messages), since it was last in front.
+    attention: bool,
+    /// The hop it makes when it gets a notification or asks for attention,
+    /// in icon lifts (HOP DIPs); only the part above 0 is drawn.
+    hop: Spring,
 }
 
 impl Item {
@@ -416,7 +439,27 @@ impl Item {
             press: Spring::new(1.0),
             shift: Spring::new(0.0),
             leaving: false,
+            badge: 0,
+            attention: false,
+            hop: Spring::new(0.0),
         }
+    }
+
+    /// Whether an Action Center notification is this app's: by its app ID
+    /// (`ids`, from `apps::app_ids`) or else by the app's name.
+    fn sent(&self, ids: &[String], n: &notifications::Waiting) -> bool {
+        if !n.aumid.is_empty() && ids.iter().any(|id| id.eq_ignore_ascii_case(&n.aumid)) {
+            return true;
+        }
+        if n.app.is_empty() {
+            return false;
+        }
+        let stem = self
+            .exe
+            .as_deref()
+            .and_then(|e| std::path::Path::new(e).file_stem())
+            .map(|s| s.to_string_lossy().to_string());
+        n.app.eq_ignore_ascii_case(&self.name) || stem.is_some_and(|s| n.app.eq_ignore_ascii_case(&s))
     }
 
     fn owns(&self, window: &AppWindow) -> bool {
@@ -499,6 +542,8 @@ pub struct Dock {
     texts: crate::text::TextCache,
     label_format: IDWriteTextFormat,
     time_format: IDWriteTextFormat,
+    /// The number on an icon's badge.
+    badge_format: IDWriteTextFormat,
     /// Segoe Fluent Icons, for the show-desktop button.
     glyph_format: IDWriteTextFormat,
     items: Vec<Item>,
@@ -624,6 +669,7 @@ impl Dock {
                 brush,
                 label_format: text_format(&dwrite, 12.0, DWRITE_FONT_WEIGHT_NORMAL)?,
                 time_format: text_format(&dwrite, 12.5, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
+                badge_format: text_format(&dwrite, 10.0, DWRITE_FONT_WEIGHT_SEMI_BOLD)?,
                 glyph_format: glyph_format(&dwrite, 14.0)?,
                 dwrite,
                 texts: Default::default(),
@@ -701,6 +747,7 @@ impl Dock {
             }
 
             let _ = RegisterShellHookWindow(hwnd);
+            notifications::watch_waiting(hwnd, WM_BADGES);
             crate::appicon::add(hwnd, WM_TRAYICON);
             crate::update::start(hwnd, WM_UPDATE);
             apps::prefetch_start_ids();
@@ -877,6 +924,9 @@ impl Dock {
                 }
                 if let Ok(glyph) = glyph_format(&self.dwrite, 14.0 * scale) {
                     self.glyph_format = glyph;
+                }
+                if let Ok(badge) = text_format(&self.dwrite, 10.0 * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD) {
+                    self.badge_format = badge;
                 }
             }
 
@@ -1146,6 +1196,56 @@ impl Dock {
         self.foreground = unsafe { GetForegroundWindow() };
         self.update_fullscreen();
         self.update_window_state();
+        self.update_badges();
+    }
+
+    // ---- badges ------------------------------------------------------------
+
+    /// Each icon's badge (its notifications in the Action Center that came
+    /// since it was last in front) and attention dot (a window of it flashed);
+    /// the icon hops when either is new. The main dock first takes what the
+    /// app in front has as seen.
+    fn update_badges(&mut self) {
+        let waiting = notifications::waiting();
+        let ids: Vec<Vec<String>> = if waiting.is_empty() {
+            vec![Vec::new(); self.items.len()]
+        } else {
+            self.items.iter().map(|it| apps::app_ids(it.aumid.as_deref(), it.exe.as_deref())).collect()
+        };
+        if self.is_main() {
+            let foreground = unsafe { GetForegroundWindow() };
+            if let Some(i) = self.items.iter().position(|it| it.kind == Kind::App && it.windows.contains(&foreground)) {
+                let item = &self.items[i];
+                notifications::mark_seen(waiting.iter().filter(|n| item.sent(&ids[i], n)));
+                ATTENTION.with(|a| {
+                    let mut a = a.borrow_mut();
+                    for h in &item.windows {
+                        a.remove(&(h.0 as isize));
+                    }
+                });
+            }
+        }
+        let ready = self.ready;
+        for (item, ids) in self.items.iter_mut().zip(&ids) {
+            if item.kind != Kind::App {
+                continue;
+            }
+            let unseen: Vec<&notifications::Waiting> =
+                waiting.iter().filter(|n| item.sent(ids, n) && notifications::unseen(n)).collect();
+            let badge = unseen.iter().filter(|n| n.loud).count();
+            // Channel messages that do not mention the user only get the dot.
+            let attention = unseen.iter().any(|n| !n.loud)
+                || ATTENTION.with(|a| {
+                    let a = a.borrow();
+                    item.windows.iter().any(|h| a.contains(&(h.0 as isize)))
+                });
+            if ready && (badge > item.badge || (attention && !item.attention)) {
+                // Up about one HOP, back down, and a small second bounce.
+                item.hop.velocity = 26.0;
+            }
+            item.badge = badge;
+            item.attention = attention;
+        }
         self.start_animation();
     }
 
@@ -1261,7 +1361,9 @@ impl Dock {
         }
 
         // The spread-out bar, then Fixed mode's full-width version of it.
-        let bar_top = height - BAR_HEIGHT * s;
+        // The reserved strip's whole pixels, so a maximized window above meets
+        // the bar without a half-covered row between them.
+        let bar_top = height - self.bar_height() as f32;
         let around = rect(left - PAD_X * s, bar_top, left + content_width + PAD_X * s, height);
         let full = lerp_rect(around, rect(0.0, bar_top, width, height), w);
 
@@ -1488,6 +1590,8 @@ impl Dock {
             moving |= item.pop.step(dt, 400.0, 25.0);
             moving |= item.press.step(dt, 500.0, 38.0);
             moving |= item.shift.step(dt, 400.0, 35.0);
+            // Loosely damped, so it comes back down and bounces once more.
+            moving |= item.hop.step(dt, 300.0, 10.0);
             // A closing app's slot closes once its icon has shrunk away.
             if item.leaving && item.pop.value < 0.05 {
                 item.presence.target = 0.0;
@@ -1658,8 +1762,10 @@ impl Dock {
                         continue;
                     }
                     let cx = slot.x + slot.size / 2.0;
-                    let base = rect(slot.x, layout.icon_bottom - slot.size, slot.x + slot.size, layout.icon_bottom);
+                    let lift = item.hop.value.max(0.0) * HOP * s;
+                    let base = rect(slot.x, layout.icon_bottom - slot.size - lift, slot.x + slot.size, layout.icon_bottom - lift);
                     let tile = scale_rect(base, visible);
+                    let boxed = tile;
                     let opacity = item.opacity() * content;
                     // With boxes, the icon grows inside its box instead of the
                     // box growing: up to 90% of it at the highest magnification.
@@ -1674,6 +1780,13 @@ impl Dock {
                         (Kind::Start, _) => self.draw_start(tile, opacity),
                         (Kind::App, Some(icon)) => draw_icon(&rt, icon, tile, opacity),
                         (Kind::App, None) => self.draw_placeholder(item, tile, opacity),
+                    }
+                    if item.badge > 0 || item.attention {
+                        // At the corner of the box, or of the icon itself without boxes.
+                        let reach = if self.settings.tiles { 0.42 } else { ICON_FILL / 2.0 + 0.04 };
+                        let (w, cy) = (boxed.right - boxed.left, (boxed.top + boxed.bottom) / 2.0);
+                        let corner = pt(cx + w * reach, cy - w * reach);
+                        self.draw_badge(item.badge, corner, opacity);
                     }
 
                     // Nectar's running indicator: a glowing 14 x 3 line (20 wide
@@ -1894,6 +2007,40 @@ impl Dock {
                 self.surface.rt.DrawTextLayout(origin, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
         }
+    }
+
+    /// A badge centered on `center`: a red pill with the number of waiting
+    /// messages, or an orange dot when the app only wants attention (as the
+    /// taskbar's orange flash). A ring in the bar's color keeps it apart from
+    /// the icon under it.
+    fn draw_badge(&self, count: usize, center: Vector2, opacity: f32) {
+        let s = self.scale;
+        let (r, g, b) = surface();
+        let ring = 1.5 * s;
+        if count == 0 {
+            let radius = 4.0 * s;
+            let dot = rect(center.X - radius, center.Y - radius, center.X + radius, center.Y + radius);
+            self.fill_rounded(
+                rect(dot.left - ring, dot.top - ring, dot.right + ring, dot.bottom + ring),
+                radius + ring,
+                rgba(r, g, b, opacity),
+            );
+            let c = ATTENTION_ORANGE;
+            self.fill_rounded(dot, radius, rgba(c.r, c.g, c.b, opacity));
+            return;
+        }
+        let text = if count > 99 { "99+".to_string() } else { count.to_string() };
+        let (tw, th) = self.text_size(&text, &self.badge_format);
+        let height = 16.0 * s;
+        let width = (tw + 9.0 * s).max(height);
+        let pill = rect(center.X - width / 2.0, center.Y - height / 2.0, center.X + width / 2.0, center.Y + height / 2.0);
+        self.fill_rounded(
+            rect(pill.left - ring, pill.top - ring, pill.right + ring, pill.bottom + ring),
+            height / 2.0 + ring,
+            rgba(r, g, b, opacity),
+        );
+        self.fill_rounded(pill, height / 2.0, rgba(BADGE_RED.r, BADGE_RED.g, BADGE_RED.b, opacity));
+        self.draw_text(&text, &self.badge_format, pt(center.X - tw / 2.0, center.Y - th / 2.0), pure_white(opacity));
     }
 
     fn draw_placeholder(&self, item: &Item, r: D2D_RECT_F, opacity: f32) {
@@ -2751,10 +2898,32 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                 broadcast(WM_SYNC_FOREGROUND, lparam);
                 dock.foreground = HWND(lparam.0 as *mut _);
                 dock.update_fullscreen();
+                // Its app's badge and attention dot clear (see `update_badges`).
+                dock.update_badges();
+                broadcast(WM_BADGES, LPARAM(0));
                 dock.render();
                 dock.schedule_refresh();
             }
+            HSHELL_FLASH => {
+                let window = HWND(lparam.0 as *mut _);
+                if !window.0.is_null() && window != GetForegroundWindow() {
+                    // A dialog may flash for its main window, which is the one on the dock.
+                    let owner = GetAncestor(window, GA_ROOTOWNER);
+                    ATTENTION.with(|a| {
+                        let mut a = a.borrow_mut();
+                        a.insert(window.0 as isize);
+                        if !owner.0.is_null() {
+                            a.insert(owner.0 as isize);
+                        }
+                    });
+                    dock.update_badges();
+                    broadcast(WM_BADGES, LPARAM(0));
+                }
+            }
             HSHELL_WINDOWCREATED | HSHELL_WINDOWDESTROYED | HSHELL_WINDOWREPLACED | HSHELL_REDRAW => {
+                if wparam.0 & 0xFFFF == HSHELL_WINDOWDESTROYED {
+                    ATTENTION.with(|a| a.borrow_mut().remove(&lparam.0));
+                }
                 broadcast(WM_SYNC_REFRESH, LPARAM(0));
                 dock.schedule_refresh();
             }
@@ -2905,6 +3074,14 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_SYNC_REFRESH => {
             (*ptr).schedule_refresh();
+            LRESULT(0)
+        }
+        WM_BADGES => {
+            let dock = &mut *ptr;
+            dock.update_badges();
+            if dock.is_main() {
+                broadcast(WM_BADGES, LPARAM(0));
+            }
             LRESULT(0)
         }
         WM_SYNC_FOREGROUND => {

@@ -105,7 +105,9 @@ Command line: `Pollen.exe --install` installs or updates without asking,
   - **Sabit (Fixed):** always visible, reserves its strip. While a window is
     maximized or snapped down to it, the bar widens to the full screen width, so the
     strip never shows bare wallpaper beside the bar; the tray and the clock go to
-    the corner and the icons stay in the middle of the screen, as on the taskbar
+    the corner and the icons stay in the middle of the screen, as on the taskbar.
+    Maximized windows reach the bar: apps such as Windows Terminal, VS Code and
+    Chrome no longer stop 2 px short of it for an auto-hidden taskbar
   - **Akıllı (Smart):** reserves nothing, hides while a window covers it
   - **Göz at (Peek):** hidden until the mouse reaches the bottom edge
 - The Windows taskbar pins, in the same order, including Store apps pinned from Start
@@ -121,6 +123,11 @@ Command line: `Pollen.exe --install` installs or updates without asking,
 - Start button, a clock (click: notifications and calendar) and the taskbar's
   show-desktop button at the right end (in the screen's corner when full width)
 - Click to open, click a running app to focus it, again to minimize, or to cycle its windows
+- Badges: a red count of an app's direct messages and mentions waiting in the
+  Action Center, and an orange dot when it flashes for attention or has other new
+  notifications (a chat app's channel messages: Slack and Discord are told apart);
+  the icon hops when one is new and both clear once the app is in front (kept in
+  `%APPDATA%\Pollen\notifications-seen.txt`, so read ones stay read)
 - Apps open through Explorer, as from the taskbar: they are Explorer's children,
   not Pollen's (tools that group processes by parent, such as PC Manager, don't
   count their memory as Pollen's), and they get Explorer's current environment

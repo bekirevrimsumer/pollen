@@ -1,7 +1,8 @@
 //! Hides the Windows taskbar while Pollen replaces it, and always gives it back.
 //!
-//! The taskbar is switched to auto-hide (so it reserves no screen space), hidden and
-//! parked below its monitor. Its original state is written to a marker file first,
+//! The taskbar is switched to auto-hide (so it reserves no screen space), hidden,
+//! parked below its monitor and taken off the shell's list of auto-hide bars (see
+//! `drop_autohide_bars`). Its original state is written to a marker file first,
 //! so a crash or a killed process can be undone on the next start or with
 //! `pollen --restore-taskbar`.
 //!
@@ -16,13 +17,16 @@ use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
-use windows::Win32::UI::Shell::{SHAppBarMessage, ABM_GETSTATE, ABM_SETSTATE, APPBARDATA};
+use windows::Win32::UI::Shell::{
+    SHAppBarMessage, ABE_BOTTOM, ABE_LEFT, ABE_RIGHT, ABE_TOP, ABM_GETAUTOHIDEBAREX, ABM_GETSTATE,
+    ABM_SETAUTOHIDEBAREX, ABM_SETSTATE, APPBARDATA,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowExW, FindWindowW, GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible,
+    FindWindowExW, FindWindowW, GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, IsZoomed,
     SendMessageTimeoutW, SetWindowPos, ShowWindow, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW,
     WINEVENT_OUTOFCONTEXT,
-    HWND_BROADCAST, SMTO_ABORTIFHUNG, SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SW_HIDE, SW_SHOW,
-    WM_SETTINGCHANGE,
+    HWND_BROADCAST, SMTO_ABORTIFHUNG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SW_HIDE, SW_SHOW, WM_SETTINGCHANGE,
 };
 
 const ABS_AUTOHIDE: isize = 1;
@@ -97,6 +101,80 @@ fn set_state(state: isize) {
     unsafe { SHAppBarMessage(ABM_SETSTATE, &mut abd) };
 }
 
+const EDGES: [u32; 4] = [ABE_LEFT, ABE_TOP, ABE_RIGHT, ABE_BOTTOM];
+
+fn edge_data(hwnd: Option<HWND>, edge: u32, monitor: RECT, register: bool) -> APPBARDATA {
+    APPBARDATA {
+        cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+        hWnd: hwnd.unwrap_or_default(),
+        uEdge: edge,
+        rc: monitor,
+        lParam: LPARAM(register as isize),
+        ..Default::default()
+    }
+}
+
+/// Windows Terminal, VS Code, Chrome and other apps stop a maximized window
+/// 2 px short of a screen edge that has an auto-hide taskbar, so the mouse can
+/// still bring the taskbar up; above the dock that strip showed the wallpaper.
+/// Pollen's taskbar never comes up, so it is taken off the shell's list of
+/// auto-hide bars (`restore` puts it back). Returns whether anything changed.
+fn drop_autohide_bars() -> bool {
+    let mut dropped = false;
+    for tb in taskbars() {
+        let monitor = monitor_of(tb);
+        for edge in EDGES {
+            let mut query = edge_data(None, edge, monitor, false);
+            let bar = unsafe { SHAppBarMessage(ABM_GETAUTOHIDEBAREX, &mut query) };
+            if bar != 0 && bar == tb.0 as usize {
+                let mut drop = edge_data(Some(tb), edge, monitor, false);
+                unsafe { SHAppBarMessage(ABM_SETAUTOHIDEBAREX, &mut drop) };
+                dropped = true;
+            }
+        }
+    }
+    if dropped {
+        refresh_maximized();
+    }
+    dropped
+}
+
+/// Makes maximized windows work out their frame again (without moving), so
+/// those that left a strip for an auto-hide taskbar close it.
+fn refresh_maximized() {
+    for window in crate::apps::app_windows() {
+        unsafe {
+            if IsZoomed(window.hwnd).as_bool() {
+                let _ = SetWindowPos(
+                    window.hwnd,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+        }
+    }
+}
+
+/// The edge a taskbar sits on.
+fn edge_of(tb: HWND) -> u32 {
+    let monitor = monitor_of(tb);
+    let mut r = RECT::default();
+    if unsafe { GetWindowRect(tb, &mut r) }.is_err() {
+        return ABE_BOTTOM;
+    }
+    let vertical = r.bottom - r.top > r.right - r.left;
+    match (vertical, r.left <= monitor.left, r.top <= monitor.top) {
+        (true, true, _) => ABE_LEFT,
+        (true, false, _) => ABE_RIGHT,
+        (false, _, true) if r.bottom < monitor.bottom => ABE_TOP,
+        _ => ABE_BOTTOM,
+    }
+}
+
 /// Hides every taskbar. Safe to call repeatedly.
 pub fn hide() {
     let Ok(mut saved) = SAVED.lock() else { return };
@@ -135,6 +213,7 @@ pub fn hide() {
             let _ = SetWindowPos(tb, None, m.left, m.bottom, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
     }
+    drop_autohide_bars();
 }
 
 /// Explorer sometimes shows its taskbar again (display changes, Explorer restarts).
@@ -153,6 +232,8 @@ pub fn keep_hidden() {
             }
         }
     }
+    // Explorer signs its taskbar up again when it lays it out anew.
+    drop_autohide_bars();
 }
 
 /// An auto-hidden taskbar slides up when the mouse touches the bottom edge. This
@@ -251,6 +332,12 @@ pub fn restore() {
             };
             let _ = SetWindowPos(tb, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             let _ = ShowWindow(tb, SW_SHOW);
+            // The user's own taskbar auto-hides: put it back on the shell's list
+            // of auto-hide bars (see `drop_autohide_bars`).
+            if state & ABS_AUTOHIDE != 0 {
+                let mut register = edge_data(Some(tb), edge_of(tb), monitor, true);
+                SHAppBarMessage(ABM_SETAUTOHIDEBAREX, &mut register);
+            }
         }
     }
 
